@@ -15,14 +15,14 @@
 
 namespace reshade::d3d10
 {
-	struct d3d10_tex_data
+	struct tex_data
 	{
 		com_ptr<ID3D10Texture2D> texture;
 		com_ptr<ID3D10RenderTargetView> rtv[2];
 		com_ptr<ID3D10ShaderResourceView> srv[2];
 	};
 
-	struct d3d10_pass_data
+	struct pass_data
 	{
 		com_ptr<ID3D10BlendState> blend_state;
 		com_ptr<ID3D10DepthStencilState> depth_stencil_state;
@@ -32,30 +32,28 @@ namespace reshade::d3d10
 		std::vector<com_ptr<ID3D10ShaderResourceView>> srvs, modified_resources;
 	};
 
-	struct d3d10_effect_data
+	struct effect_data
 	{
 		com_ptr<ID3D10Buffer> cb;
 	};
 
-	struct d3d10_technique_data
+	struct technique_data
 	{
 		bool query_in_flight = false;
 		com_ptr<ID3D10Query> timestamp_disjoint;
 		com_ptr<ID3D10Query> timestamp_query_beg;
 		com_ptr<ID3D10Query> timestamp_query_end;
 		std::vector<com_ptr<ID3D10SamplerState>> sampler_states;
-		std::vector<com_ptr<ID3D10ShaderResourceView>> srv_bindings;
-		std::vector<d3d10_pass_data> passes;
+		std::vector<pass_data> passes;
 	};
 }
 
-reshade::d3d10::runtime_d3d10::runtime_d3d10(ID3D10Device1 *device, IDXGISwapChain *swapchain, buffer_detection *bdc) :
-	_device(device), _swapchain(swapchain), _buffer_detection(bdc),
-	_app_state(device)
+extern bool is_windows7();
+
+reshade::d3d10::runtime_d3d10::runtime_d3d10(ID3D10Device1 *device, IDXGISwapChain *swapchain, state_tracking *state_tracking) :
+	_app_state(device), _state_tracking(*state_tracking), _device(device), _swapchain(swapchain)
 {
-	assert(bdc != nullptr);
-	assert(device != nullptr);
-	assert(swapchain != nullptr);
+	assert(device != nullptr && swapchain != nullptr && state_tracking != nullptr);
 
 	_renderer_id = device->GetFeatureLevel();
 
@@ -77,23 +75,23 @@ reshade::d3d10::runtime_d3d10::runtime_d3d10(ID3D10Device1 *device, IDXGISwapCha
 #if RESHADE_GUI
 	subscribe_to_ui("D3D10", [this]() {
 #if RESHADE_DEPTH
-		draw_depth_debug_menu(*_buffer_detection);
+		draw_depth_debug_menu();
 #endif
 	});
 #endif
 #if RESHADE_DEPTH
 	subscribe_to_load_config([this](const ini_file &config) {
-		config.get("D3D10", "DepthCopyBeforeClears", _buffer_detection->preserve_depth_buffers);
-		config.get("D3D10", "DepthCopyBeforeClearsIndex", _buffer_detection->depthstencil_clear_index.second);
-		config.get("D3D10", "UseAspectRatioHeuristics", _filter_aspect_ratio);
+		config.get("D3D10", "DepthCopyBeforeClears", _state_tracking.preserve_depth_buffers);
+		config.get("D3D10", "DepthCopyAtClearIndex", _state_tracking.depthstencil_clear_index.second);
+		config.get("D3D10", "UseAspectRatioHeuristics", _state_tracking.use_aspect_ratio_heuristics);
 
-		if (_buffer_detection->depthstencil_clear_index.second == std::numeric_limits<UINT>::max())
-			_buffer_detection->depthstencil_clear_index.second  = 0;
+		if (_state_tracking.depthstencil_clear_index.second == std::numeric_limits<UINT>::max())
+			_state_tracking.depthstencil_clear_index.second  = 0;
 	});
 	subscribe_to_save_config([this](ini_file &config) {
-		config.set("D3D10", "DepthCopyBeforeClears", _buffer_detection->preserve_depth_buffers);
-		config.set("D3D10", "DepthCopyBeforeClearsIndex", _buffer_detection->depthstencil_clear_index.second);
-		config.set("D3D10", "UseAspectRatioHeuristics", _filter_aspect_ratio);
+		config.set("D3D10", "DepthCopyBeforeClears", _state_tracking.preserve_depth_buffers);
+		config.set("D3D10", "DepthCopyAtClearIndex", _state_tracking.depthstencil_clear_index.second);
+		config.set("D3D10", "UseAspectRatioHeuristics", _state_tracking.use_aspect_ratio_heuristics);
 	});
 #endif
 }
@@ -130,13 +128,9 @@ bool reshade::d3d10::runtime_d3d10::on_init(const DXGI_SWAP_CHAIN_DESC &swap_des
 	tex_desc.BindFlags = D3D10_BIND_RENDER_TARGET;
 
 	// Creating a render target view for the back buffer fails on Windows 8+, so use a intermediate texture there
-	OSVERSIONINFOEX verinfo_windows7 = { sizeof(OSVERSIONINFOEX), 6, 1 };
-	const bool is_windows7 = VerifyVersionInfo(&verinfo_windows7, VER_MAJORVERSION | VER_MINORVERSION,
-		VerSetConditionMask(VerSetConditionMask(0, VER_MAJORVERSION, VER_EQUAL), VER_MINORVERSION, VER_EQUAL)) != FALSE;
-
 	if (swap_desc.SampleDesc.Count > 1 ||
 		make_dxgi_format_normal(_backbuffer_format) != _backbuffer_format ||
-		!is_windows7)
+		!is_windows7())
 	{
 		if (FAILED(_device->CreateTexture2D(&tex_desc, nullptr, &_backbuffer_resolved)))
 			return false;
@@ -265,13 +259,12 @@ void reshade::d3d10::runtime_d3d10::on_present()
 	if (!_is_initialized)
 		return;
 
-	assert(_buffer_detection != nullptr);
-	_vertices = _buffer_detection->total_vertices();
-	_drawcalls = _buffer_detection->total_drawcalls();
+	_vertices = _state_tracking.total_vertices();
+	_drawcalls = _state_tracking.total_drawcalls();
 
 #if RESHADE_DEPTH
 	update_depth_texture_bindings(_has_high_network_activity ? nullptr :
-		_buffer_detection->find_best_depth_texture(_filter_aspect_ratio ? _width : 0, _height, _depth_texture_override));
+		_state_tracking.find_best_depth_texture(_width, _height, _depth_texture_override));
 #endif
 
 	_app_state.capture();
@@ -316,6 +309,15 @@ void reshade::d3d10::runtime_d3d10::on_present()
 
 bool reshade::d3d10::runtime_d3d10::capture_screenshot(uint8_t *buffer) const
 {
+	if (_color_bit_depth != 8 && _color_bit_depth != 10)
+	{
+		if (const char *format_string = format_to_string(_backbuffer_format); format_string != nullptr)
+			LOG(ERROR) << "Screenshots are not supported for back buffer format " << format_string << '!';
+		else
+			LOG(ERROR) << "Screenshots are not supported for back buffer format " << _backbuffer_format << '!';
+		return false;
+	}
+
 	// Create a texture in system memory, copy back buffer data into it and map it for reading
 	D3D10_TEXTURE2D_DESC desc = {};
 	desc.Width = _width;
@@ -384,7 +386,7 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 
 	if (_d3d_compiler == nullptr)
 	{
-		LOG(ERROR) << "Unable to load HLSL compiler (\"d3dcompiler_47.dll\")." << " Make sure you have the DirectX end-user runtime (June 2010) installed or a newer version of the library in the application directory.";
+		LOG(ERROR) << "Unable to load HLSL compiler (\"d3dcompiler_47.dll\")!" << " Make sure you have the DirectX end-user runtime (June 2010) installed or a newer version of the library in the application directory.";
 		return false;
 	}
 
@@ -399,9 +401,9 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 	// Compile the generated HLSL source code to DX byte code
 	for (const reshadefx::entry_point &entry_point : effect.module.entry_points)
 	{
-		std::string profile;
-		com_ptr<ID3DBlob> d3d_compiled, d3d_errors;
+		HRESULT hr = E_FAIL;
 
+		std::string profile;
 		switch (entry_point.type)
 		{
 		case reshadefx::shader_type::vs:
@@ -435,32 +437,48 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 			break;
 		}
 
-		HRESULT hr = D3DCompile(
-			hlsl.c_str(), hlsl.size(),
-			nullptr, nullptr, nullptr,
-			entry_point.name.c_str(),
-			profile.c_str(),
-			D3DCOMPILE_ENABLE_STRICTNESS | (_performance_mode ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_OPTIMIZATION_LEVEL1), 0,
-			&d3d_compiled, &d3d_errors);
+		std::string attributes;
+		attributes += "entrypoint=" + entry_point.name + ';';
+		attributes += "profile=" + profile + ';';
+		attributes += "flags=" + std::to_string(D3DCOMPILE_ENABLE_STRICTNESS | (_performance_mode ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_OPTIMIZATION_LEVEL1)) + ';';
 
-		if (d3d_errors != nullptr) // Append warnings to the output error string as well
-			effect.errors.append(static_cast<const char *>(d3d_errors->GetBufferPointer()), d3d_errors->GetBufferSize() - 1); // Subtracting one to not append the null-terminator as well
+		const size_t hash = std::hash<std::string_view>()(attributes) ^ std::hash<std::string_view>()(hlsl);
+		std::vector<char> cso;
+		if (!load_effect_cache(effect.source_file, entry_point.name, hash, cso, effect.assembly[entry_point.name]))
+		{
+			com_ptr<ID3DBlob> d3d_compiled, d3d_errors;
+			hr = D3DCompile(
+				hlsl.data(), hlsl.size(),
+				nullptr, nullptr, nullptr,
+				entry_point.name.c_str(),
+				profile.c_str(),
+				D3DCOMPILE_ENABLE_STRICTNESS | (_performance_mode ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_OPTIMIZATION_LEVEL1), 0,
+				&d3d_compiled, &d3d_errors);
 
-		// No need to setup resources if any of the shaders failed to compile
-		if (FAILED(hr))
-			return false;
+			if (d3d_errors != nullptr) // Append warnings to the output error string as well
+				effect.errors.append(static_cast<const char *>(d3d_errors->GetBufferPointer()), d3d_errors->GetBufferSize() - 1); // Subtracting one to not append the null-terminator as well
 
-		if (com_ptr<ID3DBlob> d3d_disassembled; SUCCEEDED(D3DDisassemble(d3d_compiled->GetBufferPointer(), d3d_compiled->GetBufferSize(), 0, nullptr, &d3d_disassembled)))
-			effect.assembly[entry_point.name] = std::string(static_cast<const char *>(d3d_disassembled->GetBufferPointer()));
+			// No need to setup resources if any of the shaders failed to compile
+			if (FAILED(hr))
+				return false;
+
+			cso.resize(d3d_compiled->GetBufferSize());
+			std::memcpy(cso.data(), d3d_compiled->GetBufferPointer(), cso.size());
+
+			if (com_ptr<ID3DBlob> d3d_disassembled; SUCCEEDED(D3DDisassemble(cso.data(), cso.size(), 0, nullptr, &d3d_disassembled)))
+				effect.assembly[entry_point.name].assign(static_cast<const char *>(d3d_disassembled->GetBufferPointer()), d3d_disassembled->GetBufferSize() - 1);
+
+			save_effect_cache(effect.source_file, entry_point.name, hash, cso, effect.assembly[entry_point.name]);
+		}
 
 		// Create runtime shader objects from the compiled DX byte code
 		switch (entry_point.type)
 		{
 		case reshadefx::shader_type::vs:
-			hr = _device->CreateVertexShader(d3d_compiled->GetBufferPointer(), d3d_compiled->GetBufferSize(), reinterpret_cast<ID3D10VertexShader **>(&entry_points[entry_point.name]));
+			hr = _device->CreateVertexShader(cso.data(), cso.size(), reinterpret_cast<ID3D10VertexShader **>(&entry_points[entry_point.name]));
 			break;
 		case reshadefx::shader_type::ps:
-			hr = _device->CreatePixelShader(d3d_compiled->GetBufferPointer(), d3d_compiled->GetBufferSize(), reinterpret_cast<ID3D10PixelShader **>(&entry_points[entry_point.name]));
+			hr = _device->CreatePixelShader(cso.data(), cso.size(), reinterpret_cast<ID3D10PixelShader **>(&entry_points[entry_point.name]));
 			break;
 		}
 
@@ -473,7 +491,7 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 
 	if (index >= _effect_data.size())
 		_effect_data.resize(index + 1);
-	d3d10_effect_data &effect_data = _effect_data[index];
+	effect_data &effect_data = _effect_data[index];
 
 	if (!effect.uniform_data_storage.empty())
 	{
@@ -488,11 +506,8 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 		}
 	}
 
-	d3d10_technique_data technique_init;
-	assert(effect.module.num_storage_bindings == 0);
-	technique_init.srv_bindings.resize(effect.module.num_texture_bindings);
+	technique_data technique_init;
 	technique_init.sampler_states.resize(effect.module.num_sampler_bindings);
-
 	for (const reshadefx::sampler_info &info : effect.module.samplers)
 	{
 		if (info.binding >= D3D10_COMMONSHADER_SAMPLER_SLOT_COUNT)
@@ -500,16 +515,6 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 			LOG(ERROR) << "Cannot bind sampler '" << info.unique_name << "' since it exceeds the maximum number of allowed sampler slots in " << "D3D10" << " (" << info.binding << ", allowed are up to " << D3D10_COMMONSHADER_SAMPLER_SLOT_COUNT << ").";
 			return false;
 		}
-		if (info.texture_binding >= D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT)
-		{
-			LOG(ERROR) << "Cannot bind texture '" << info.texture_name << "' since it exceeds the maximum number of allowed resource slots in " << "D3D10" << " (" << info.texture_binding << ", allowed are up to " << D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT << ").";
-			return false;
-		}
-
-		const texture &texture = look_up_texture_by_name(info.texture_name);
-
-		technique_init.srv_bindings[info.texture_binding] =
-			static_cast<d3d10_tex_data *>(texture.impl)->srv[info.srgb ? 1 : 0];
 
 		if (technique_init.sampler_states[info.binding] == nullptr)
 		{
@@ -554,7 +559,7 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 			continue;
 
 		// Copy construct new technique implementation instead of move because effect may contain multiple techniques
-		auto impl = new d3d10_technique_data(technique_init);
+		auto impl = new technique_data(technique_init);
 		technique.impl = impl;
 
 		D3D10_QUERY_DESC query_desc = {};
@@ -567,17 +572,17 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 		impl->passes.resize(technique.passes.size());
 		for (size_t pass_index = 0; pass_index < technique.passes.size(); ++pass_index)
 		{
-			d3d10_pass_data &pass_data = impl->passes[pass_index];
+			pass_data &pass_data = impl->passes[pass_index];
 			reshadefx::pass_info &pass_info = technique.passes[pass_index];
 
 			entry_points.at(pass_info.ps_entry_point)->QueryInterface(&pass_data.pixel_shader);
 			entry_points.at(pass_info.vs_entry_point)->QueryInterface(&pass_data.vertex_shader);
 
-			const int target_index = pass_info.srgb_write_enable ? 1 : 0;
+			const int srgb_index = pass_info.srgb_write_enable ? 1 : 0;
 
 			for (UINT k = 0; k < 8 && !pass_info.render_target_names[k].empty(); ++k)
 			{
-				d3d10_tex_data *const tex_impl = static_cast<d3d10_tex_data *>(
+				tex_data *const tex_impl = static_cast<tex_data *>(
 					look_up_texture_by_name(pass_info.render_target_names[k]).impl);
 
 				D3D10_TEXTURE2D_DESC desc;
@@ -590,9 +595,9 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 				rtv_desc.ViewDimension = desc.SampleDesc.Count > 1 ? D3D10_RTV_DIMENSION_TEXTURE2DMS : D3D10_RTV_DIMENSION_TEXTURE2D;
 
 				// Create render target view for texture on demand when it is first used
-				if (tex_impl->rtv[target_index] == nullptr)
+				if (tex_impl->rtv[srgb_index] == nullptr)
 				{
-					if (HRESULT hr = _device->CreateRenderTargetView(tex_impl->texture.get(), &rtv_desc, &tex_impl->rtv[target_index]); FAILED(hr))
+					if (HRESULT hr = _device->CreateRenderTargetView(tex_impl->texture.get(), &rtv_desc, &tex_impl->rtv[srgb_index]); FAILED(hr))
 					{
 						LOG(ERROR) << "Failed to create render target view for texture '" << pass_info.render_target_names[k] << "'! HRESULT is " << hr << '.';
 						LOG(DEBUG) << "> Details: Format = " << rtv_desc.Format << ", ViewDimension = " << rtv_desc.ViewDimension;
@@ -600,17 +605,16 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 					}
 				}
 
-				pass_data.render_targets[k] = tex_impl->rtv[target_index];
-				pass_data.modified_resources.push_back(tex_impl->srv[target_index]);
+				pass_data.render_targets[k] = tex_impl->rtv[srgb_index];
+				pass_data.modified_resources.push_back(tex_impl->srv[srgb_index]);
 			}
 
 			if (pass_info.render_target_names[0].empty())
 			{
-				pass_data.render_targets[0] = _backbuffer_rtv[target_index];
-				pass_data.modified_resources.push_back(_backbuffer_texture_srv[target_index]);
-
 				pass_info.viewport_width = _width;
 				pass_info.viewport_height = _height;
+				pass_data.render_targets[0] = _backbuffer_rtv[srgb_index];
+				pass_data.modified_resources.push_back(_backbuffer_texture_srv[srgb_index]);
 			}
 
 			{   D3D10_BLEND_DESC desc;
@@ -717,28 +721,19 @@ bool reshade::d3d10::runtime_d3d10::init_effect(size_t index)
 				}
 			}
 
-			// Unbind any shader resources that are also bound as render target
-			pass_data.srvs = impl->srv_bindings;
-			for (com_ptr<ID3D10ShaderResourceView> &srv : pass_data.srvs)
+			pass_data.srvs.resize(effect.module.num_texture_bindings);
+			for (const reshadefx::sampler_info &info : pass_info.samplers)
 			{
-				if (srv == nullptr)
-					continue;
-				com_ptr<ID3D10Resource> srv_res;
-				srv->GetResource(&srv_res);
-
-				for (const com_ptr<ID3D10RenderTargetView> &rtv : pass_data.render_targets)
+				if (info.texture_binding >= D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT)
 				{
-					if (rtv == nullptr)
-						continue;
-					com_ptr<ID3D10Resource> rtv_res;
-					rtv->GetResource(&rtv_res);
-
-					if (srv_res == rtv_res)
-					{
-						srv.reset();
-						break;
-					}
+					LOG(ERROR) << "Cannot bind texture '" << info.texture_name << "' since it exceeds the maximum number of allowed resource slots in " << "D3D10" << " (" << info.texture_binding << ", allowed are up to " << D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT << ").";
+					return false;
 				}
+
+				tex_data *const tex_impl = static_cast<tex_data *>(
+					look_up_texture_by_name(info.texture_name).impl);
+
+				pass_data.srvs[info.texture_binding] = tex_impl->srv[info.srgb ? 1 : 0];
 			}
 		}
 	}
@@ -752,7 +747,7 @@ void reshade::d3d10::runtime_d3d10::unload_effect(size_t index)
 		if (tech.effect_index != index)
 			continue;
 
-		delete static_cast<d3d10_technique_data *>(tech.impl);
+		delete static_cast<technique_data *>(tech.impl);
 		tech.impl = nullptr;
 	}
 
@@ -765,7 +760,7 @@ void reshade::d3d10::runtime_d3d10::unload_effects()
 {
 	for (technique &tech : _techniques)
 	{
-		delete static_cast<d3d10_technique_data *>(tech.impl);
+		delete static_cast<technique_data *>(tech.impl);
 		tech.impl = nullptr;
 	}
 
@@ -777,16 +772,17 @@ void reshade::d3d10::runtime_d3d10::unload_effects()
 
 bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 {
-	auto impl = new d3d10_tex_data();
+	auto impl = new tex_data();
 	texture.impl = impl;
 
-	switch (texture.impl_reference)
+	if (texture.semantic == "COLOR")
 	{
-	case texture_reference::back_buffer:
 		impl->srv[0] = _backbuffer_texture_srv[0];
 		impl->srv[1] = _backbuffer_texture_srv[1];
 		return true;
-	case texture_reference::depth_buffer:
+	}
+	if (texture.semantic == "DEPTH")
+	{
 #if RESHADE_DEPTH
 		impl->srv[0] = _depth_texture_srv;
 		impl->srv[1] = _depth_texture_srv;
@@ -896,8 +892,8 @@ bool reshade::d3d10::runtime_d3d10::init_texture(texture &texture)
 }
 void reshade::d3d10::runtime_d3d10::upload_texture(const texture &texture, const uint8_t *pixels)
 {
-	auto impl = static_cast<d3d10_tex_data *>(texture.impl);
-	assert(impl != nullptr && texture.impl_reference == texture_reference::none && pixels != nullptr);
+	auto impl = static_cast<tex_data *>(texture.impl);
+	assert(impl != nullptr && !texture.semantic.empty() && pixels != nullptr);
 
 	unsigned int upload_pitch;
 	std::vector<uint8_t> upload_data;
@@ -934,14 +930,14 @@ void reshade::d3d10::runtime_d3d10::upload_texture(const texture &texture, const
 }
 void reshade::d3d10::runtime_d3d10::destroy_texture(texture &texture)
 {
-	delete static_cast<d3d10_tex_data *>(texture.impl);
+	delete static_cast<tex_data *>(texture.impl);
 	texture.impl = nullptr;
 }
 
 void reshade::d3d10::runtime_d3d10::render_technique(technique &technique)
 {
-	const auto impl = static_cast<d3d10_technique_data *>(technique.impl);
-	d3d10_effect_data &effect_data = _effect_data[technique.effect_index];
+	const auto impl = static_cast<technique_data *>(technique.impl);
+	effect_data &effect_data = _effect_data[technique.effect_index];
 
 	// Evaluate queries
 	if (impl->query_in_flight)
@@ -1004,7 +1000,7 @@ void reshade::d3d10::runtime_d3d10::render_technique(technique &technique)
 			_device->CopyResource(_backbuffer_texture.get(), _backbuffer_resolved.get());
 		}
 
-		const d3d10_pass_data &pass_data = impl->passes[pass_index];
+		const pass_data &pass_data = impl->passes[pass_index];
 		const reshadefx::pass_info &pass_info = technique.passes[pass_index];
 
 		_device->VSSetShader(pass_data.vertex_shader.get());
@@ -1304,7 +1300,7 @@ void reshade::d3d10::runtime_d3d10::render_imgui_draw_data(ImDrawData *draw_data
 			_device->RSSetScissorRects(1, &scissor_rect);
 
 			ID3D10ShaderResourceView *const texture_view =
-				static_cast<const d3d10_tex_data *>(cmd.TextureId)->srv[0].get();
+				static_cast<const tex_data *>(cmd.TextureId)->srv[0].get();
 			_device->PSSetShaderResources(0, 1, &texture_view);
 
 			_device->DrawIndexed(cmd.ElemCount, cmd.IdxOffset + idx_offset, cmd.VtxOffset + vtx_offset);
@@ -1317,7 +1313,7 @@ void reshade::d3d10::runtime_d3d10::render_imgui_draw_data(ImDrawData *draw_data
 #endif
 
 #if RESHADE_DEPTH
-void reshade::d3d10::runtime_d3d10::draw_depth_debug_menu(buffer_detection &tracker)
+void reshade::d3d10::runtime_d3d10::draw_depth_debug_menu()
 {
 	if (!ImGui::CollapsingHeader("Depth Buffers", ImGuiTreeNodeFlags_DefaultOpen))
 		return;
@@ -1329,26 +1325,26 @@ void reshade::d3d10::runtime_d3d10::draw_depth_debug_menu(buffer_detection &trac
 	}
 
 	bool modified = false;
-	modified |= ImGui::Checkbox("Use aspect ratio heuristics", &_filter_aspect_ratio);
-	modified |= ImGui::Checkbox("Copy depth buffer before clear operations", &tracker.preserve_depth_buffers);
+	modified |= ImGui::Checkbox("Use aspect ratio heuristics", &_state_tracking.use_aspect_ratio_heuristics);
+	modified |= ImGui::Checkbox("Copy depth buffer before clear operations", &_state_tracking.preserve_depth_buffers);
 
 	if (modified) // Detection settings have changed, reset heuristic
-		tracker.reset(true);
+		_state_tracking.reset(true);
 
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
 
 	// Sort pointer list so that added/removed items do not change the UI much
-	std::vector<std::pair<ID3D10Texture2D *, buffer_detection::depthstencil_info>> sorted_buffers;
-	sorted_buffers.reserve(tracker.depth_buffer_counters().size());
-	for (const auto &[dsv_texture, snapshot] : tracker.depth_buffer_counters())
+	std::vector<std::pair<ID3D10Texture2D *, state_tracking::depthstencil_info>> sorted_buffers;
+	sorted_buffers.reserve(_state_tracking.depth_buffer_counters().size());
+	for (const auto &[dsv_texture, snapshot] : _state_tracking.depth_buffer_counters())
 		sorted_buffers.push_back({ dsv_texture.get(), snapshot });
 	std::sort(sorted_buffers.begin(), sorted_buffers.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
 	for (const auto &[dsv_texture, snapshot] : sorted_buffers)
 	{
 		char label[512] = "";
-		sprintf_s(label, "%s0x%p", (dsv_texture == tracker.depthstencil_clear_index.first ? "> " : "  "), dsv_texture);
+		sprintf_s(label, "%s0x%p", (dsv_texture == _state_tracking.depthstencil_clear_index.first ? "> " : "  "), dsv_texture);
 
 		D3D10_TEXTURE2D_DESC desc;
 		dsv_texture->GetDesc(&desc);
@@ -1368,16 +1364,16 @@ void reshade::d3d10::runtime_d3d10::draw_depth_debug_menu(buffer_detection &trac
 		ImGui::Text("| %4ux%-4u | %5u draw calls ==> %8u vertices |%s",
 			desc.Width, desc.Height, snapshot.total_stats.drawcalls, snapshot.total_stats.vertices, (msaa ? " MSAA" : ""));
 
-		if (tracker.preserve_depth_buffers && dsv_texture == tracker.depthstencil_clear_index.first)
+		if (_state_tracking.preserve_depth_buffers && dsv_texture == _state_tracking.depthstencil_clear_index.first)
 		{
 			for (UINT clear_index = 1; clear_index <= snapshot.clears.size(); ++clear_index)
 			{
-				sprintf_s(label, "%s  CLEAR %2u", (clear_index == tracker.depthstencil_clear_index.second ? "> " : "  "), clear_index);
+				sprintf_s(label, "%s  CLEAR %2u", (clear_index == _state_tracking.depthstencil_clear_index.second ? "> " : "  "), clear_index);
 
-				if (bool value = (tracker.depthstencil_clear_index.second == clear_index);
+				if (bool value = (_state_tracking.depthstencil_clear_index.second == clear_index);
 					ImGui::Checkbox(label, &value))
 				{
-					tracker.depthstencil_clear_index.second = value ? clear_index : 0;
+					_state_tracking.depthstencil_clear_index.second = value ? clear_index : 0;
 					modified = true;
 				}
 
@@ -1440,19 +1436,18 @@ void reshade::d3d10::runtime_d3d10::update_depth_texture_bindings(com_ptr<ID3D10
 	// Update all references to the new texture
 	for (const texture &tex : _textures)
 	{
-		if (tex.impl == nullptr ||
-			tex.impl_reference != texture_reference::depth_buffer)
+		if (tex.impl == nullptr || tex.semantic != "DEPTH")
 			continue;
-		const auto tex_impl = static_cast<d3d10_tex_data *>(tex.impl);
+		const auto tex_impl = static_cast<tex_data *>(tex.impl);
 
 		// Update references in technique list
 		for (const technique &tech : _techniques)
 		{
-			const auto tech_impl = static_cast<d3d10_technique_data *>(tech.impl);
+			const auto tech_impl = static_cast<technique_data *>(tech.impl);
 			if (tech_impl == nullptr)
 				continue;
 
-			for (d3d10_pass_data &pass_data : tech_impl->passes)
+			for (pass_data &pass_data : tech_impl->passes)
 				// Replace all occurances of the old resource view with the new one
 				for (com_ptr<ID3D10ShaderResourceView> &srv : pass_data.srvs)
 					if (tex_impl->srv[0] == srv || tex_impl->srv[1] == srv)

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "effect_expression.hpp"
+#include <unordered_set>
 
 namespace reshadefx
 {
@@ -128,7 +129,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// A struct type defined in the shader code.
+	/// A struct type defined in the effect code.
 	/// </summary>
 	struct struct_info
 	{
@@ -139,7 +140,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// A struct field defined in the shader code.
+	/// A struct field defined in the effect code.
 	/// </summary>
 	struct struct_member_info
 	{
@@ -161,7 +162,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// A texture defined in the shader code.
+	/// A texture defined in the effect code.
 	/// </summary>
 	struct texture_info
 	{
@@ -179,7 +180,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// A texture sampler defined in the shader code.
+	/// A texture sampler defined in the effect code.
 	/// </summary>
 	struct sampler_info
 	{
@@ -193,14 +194,14 @@ namespace reshadefx
 		texture_address_mode address_u = texture_address_mode::clamp;
 		texture_address_mode address_v = texture_address_mode::clamp;
 		texture_address_mode address_w = texture_address_mode::clamp;
-		float min_lod = -3.402823466e+38f; // FLT_MAX
-		float max_lod = +3.402823466e+38f;
+		float min_lod = -3.402823466e+38f;
+		float max_lod = +3.402823466e+38f; // FLT_MAX
 		float lod_bias = 0.0f;
 		uint8_t srgb = false;
 	};
 
 	/// <summary>
-	/// A texture storage object defined in the shader code.
+	/// A texture storage object defined in the effect code.
 	/// </summary>
 	struct storage_info
 	{
@@ -211,7 +212,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// An uniform variable defined in the shader code.
+	/// An uniform variable defined in the effect code.
 	/// </summary>
 	struct uniform_info
 	{
@@ -225,7 +226,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// Type of a shader.
+	/// Type of a shader entry point.
 	/// </summary>
 	enum class shader_type
 	{
@@ -244,7 +245,7 @@ namespace reshadefx
 	};
 
 	/// <summary>
-	/// A function defined in the shader code.
+	/// A function defined in the effect code.
 	/// </summary>
 	struct function_info
 	{
@@ -254,6 +255,8 @@ namespace reshadefx
 		reshadefx::type return_type;
 		std::string return_semantic;
 		std::vector<struct_member_info> parameter_list;
+		std::unordered_set<uint32_t> referenced_samplers;
+		std::unordered_set<uint32_t> referenced_storages;
 	};
 
 	/// <summary>
@@ -289,6 +292,8 @@ namespace reshadefx
 		uint32_t viewport_width = 0;
 		uint32_t viewport_height = 0;
 		uint32_t viewport_dispatch_z = 1;
+		std::vector<sampler_info> samplers;
+		std::vector<storage_info> storages;
 	};
 
 	/// <summary>

@@ -11,7 +11,7 @@
 D3D10Device::D3D10Device(IDXGIDevice1 *dxgi_device, ID3D10Device1 *original) :
 	_orig(original),
 	_dxgi_device(new DXGIDevice(dxgi_device, this)),
-	_buffer_detection(original) {
+	_state(original) {
 	assert(_orig != nullptr);
 }
 
@@ -67,7 +67,7 @@ ULONG   STDMETHODCALLTYPE D3D10Device::Release()
 	if (ref != 0)
 		return _orig->Release(), ref;
 
-	_buffer_detection.reset(true);
+	_state.reset(true);
 
 	const ULONG ref_orig = _orig->Release();
 	if (ref_orig != 0) // Verify internal reference count
@@ -103,12 +103,12 @@ void    STDMETHODCALLTYPE D3D10Device::VSSetShader(ID3D10VertexShader *pVertexSh
 }
 void    STDMETHODCALLTYPE D3D10Device::DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
 {
-	_buffer_detection.on_draw(IndexCount);
+	_state.on_draw(IndexCount);
 	_orig->DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation);
 }
 void    STDMETHODCALLTYPE D3D10Device::Draw(UINT VertexCount, UINT StartVertexLocation)
 {
-	_buffer_detection.on_draw(VertexCount);
+	_state.on_draw(VertexCount);
 	_orig->Draw(VertexCount, StartVertexLocation);
 }
 void    STDMETHODCALLTYPE D3D10Device::PSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
@@ -129,12 +129,12 @@ void    STDMETHODCALLTYPE D3D10Device::IASetIndexBuffer(ID3D10Buffer *pIndexBuff
 }
 void    STDMETHODCALLTYPE D3D10Device::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation, UINT StartInstanceLocation)
 {
-	_buffer_detection.on_draw(IndexCountPerInstance * InstanceCount);
+	_state.on_draw(IndexCountPerInstance * InstanceCount);
 	_orig->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
 }
 void    STDMETHODCALLTYPE D3D10Device::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-	_buffer_detection.on_draw(VertexCountPerInstance * InstanceCount);
+	_state.on_draw(VertexCountPerInstance * InstanceCount);
 	_orig->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
 void    STDMETHODCALLTYPE D3D10Device::GSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
@@ -187,7 +187,7 @@ void    STDMETHODCALLTYPE D3D10Device::SOSetTargets(UINT NumBuffers, ID3D10Buffe
 }
 void    STDMETHODCALLTYPE D3D10Device::DrawAuto()
 {
-	_buffer_detection.on_draw(0);
+	_state.on_draw(0);
 	_orig->DrawAuto();
 }
 void    STDMETHODCALLTYPE D3D10Device::RSSetState(ID3D10RasterizerState *pRasterizerState)
@@ -221,7 +221,7 @@ void    STDMETHODCALLTYPE D3D10Device::ClearRenderTargetView(ID3D10RenderTargetV
 void    STDMETHODCALLTYPE D3D10Device::ClearDepthStencilView(ID3D10DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth, UINT8 Stencil)
 {
 #if RESHADE_DEPTH
-	_buffer_detection.on_clear_depthstencil(ClearFlags, pDepthStencilView);
+	_state.on_clear_depthstencil(ClearFlags, pDepthStencilView);
 #endif
 	_orig->ClearDepthStencilView(pDepthStencilView, ClearFlags, Depth, Stencil);
 }
@@ -387,22 +387,20 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateTexture2D(const D3D10_TEXTURE2D_DES
 	if (FAILED(hr))
 	{
 		LOG(WARN) << "ID3D10Device::CreateTexture2D" << " failed with error code " << hr << '.';
-#if RESHADE_VERBOSE_LOG
-		LOG(DEBUG) << "> Dumping description:";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-		LOG(DEBUG) << "  | Width                                   | " << std::setw(39) << new_desc.Width << " |";
-		LOG(DEBUG) << "  | Height                                  | " << std::setw(39) << new_desc.Height << " |";
-		LOG(DEBUG) << "  | MipLevels                               | " << std::setw(39) << new_desc.MipLevels << " |";
-		LOG(DEBUG) << "  | ArraySize                               | " << std::setw(39) << new_desc.ArraySize << " |";
-		LOG(DEBUG) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
-		LOG(DEBUG) << "  | SampleCount                             | " << std::setw(39) << new_desc.SampleDesc.Count << " |";
-		LOG(DEBUG) << "  | SampleQuality                           | " << std::setw(39) << new_desc.SampleDesc.Quality << " |";
-		LOG(DEBUG) << "  | Usage                                   | " << std::setw(39) << new_desc.Usage << " |";
-		LOG(DEBUG) << "  | BindFlags                               | " << std::setw(39) << std::hex << new_desc.BindFlags << std::dec << " |";
-		LOG(DEBUG) << "  | CPUAccessFlags                          | " << std::setw(39) << std::hex << new_desc.CPUAccessFlags << std::dec << " |";
-		LOG(DEBUG) << "  | MiscFlags                               | " << std::setw(39) << std::hex << new_desc.MiscFlags << std::dec << " |";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-#endif
+		LOG(INFO) << "> Dumping description:";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
+		LOG(INFO) << "  | Width                                   | " << std::setw(39) << new_desc.Width << " |";
+		LOG(INFO) << "  | Height                                  | " << std::setw(39) << new_desc.Height << " |";
+		LOG(INFO) << "  | MipLevels                               | " << std::setw(39) << new_desc.MipLevels << " |";
+		LOG(INFO) << "  | ArraySize                               | " << std::setw(39) << new_desc.ArraySize << " |";
+		LOG(INFO) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
+		LOG(INFO) << "  | SampleCount                             | " << std::setw(39) << new_desc.SampleDesc.Count << " |";
+		LOG(INFO) << "  | SampleQuality                           | " << std::setw(39) << new_desc.SampleDesc.Quality << " |";
+		LOG(INFO) << "  | Usage                                   | " << std::setw(39) << new_desc.Usage << " |";
+		LOG(INFO) << "  | BindFlags                               | " << std::setw(39) << std::hex << new_desc.BindFlags << std::dec << " |";
+		LOG(INFO) << "  | CPUAccessFlags                          | " << std::setw(39) << std::hex << new_desc.CPUAccessFlags << std::dec << " |";
+		LOG(INFO) << "  | MiscFlags                               | " << std::setw(39) << std::hex << new_desc.MiscFlags << std::dec << " |";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 	}
 
 	return hr;
@@ -452,13 +450,11 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateShaderResourceView(ID3D10Resource *
 	if (FAILED(hr))
 	{
 		LOG(WARN) << "ID3D10Device::CreateShaderResourceView" << " failed with error code " << hr << '.';
-#if RESHADE_VERBOSE_LOG
-		LOG(DEBUG) << "> Dumping description:";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-		LOG(DEBUG) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
-		LOG(DEBUG) << "  | ViewDimension                           | " << std::setw(39) << new_desc.ViewDimension << " |";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-#endif
+		LOG(INFO) << "> Dumping description:";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
+		LOG(INFO) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
+		LOG(INFO) << "  | ViewDimension                           | " << std::setw(39) << new_desc.ViewDimension << " |";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 	}
 
 	return hr;
@@ -508,13 +504,11 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateDepthStencilView(ID3D10Resource *pR
 	if (FAILED(hr))
 	{
 		LOG(WARN) << "ID3D10Device::CreateDepthStencilView" << " failed with error code " << hr << '.';
-#if RESHADE_VERBOSE_LOG
-		LOG(DEBUG) << "> Dumping description:";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-		LOG(DEBUG) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
-		LOG(DEBUG) << "  | ViewDimension                           | " << std::setw(39) << new_desc.ViewDimension << " |";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-#endif
+		LOG(INFO) << "> Dumping description:";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
+		LOG(INFO) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
+		LOG(INFO) << "  | ViewDimension                           | " << std::setw(39) << new_desc.ViewDimension << " |";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 	}
 
 	return hr;
@@ -639,13 +633,11 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateShaderResourceView1(ID3D10Resource 
 	if (FAILED(hr))
 	{
 		LOG(WARN) << "ID3D10Device1::CreateShaderResourceView1" << " failed with error code " << hr << '.';
-#if RESHADE_VERBOSE_LOG
-		LOG(DEBUG) << "> Dumping description:";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-		LOG(DEBUG) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
-		LOG(DEBUG) << "  | ViewDimension                           | " << std::setw(39) << new_desc.ViewDimension << " |";
-		LOG(DEBUG) << "  +-----------------------------------------+-----------------------------------------+";
-#endif
+		LOG(INFO) << "> Dumping description:";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
+		LOG(INFO) << "  | Format                                  | " << std::setw(39) << new_desc.Format << " |";
+		LOG(INFO) << "  | ViewDimension                           | " << std::setw(39) << new_desc.ViewDimension << " |";
+		LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 	}
 
 	return hr;

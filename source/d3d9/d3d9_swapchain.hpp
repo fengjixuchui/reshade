@@ -6,12 +6,12 @@
 #pragma once
 
 #include <d3d9.h>
-#include <memory>
+#include <memory> // std::shared_ptr
 
 struct Direct3DDevice9;
 namespace reshade::d3d9 { class runtime_d3d9; }
 
-struct __declspec(uuid("BC52FCE4-1EAC-40C8-84CF-863600BBAA01")) Direct3DSwapChain9 : IDirect3DSwapChain9Ex
+struct DECLSPEC_UUID("BC52FCE4-1EAC-40C8-84CF-863600BBAA01") Direct3DSwapChain9 : IDirect3DSwapChain9Ex
 {
 	Direct3DSwapChain9(Direct3DDevice9 *device, IDirect3DSwapChain9   *original, const std::shared_ptr<reshade::d3d9::runtime_d3d9> &runtime);
 	Direct3DSwapChain9(Direct3DDevice9 *device, IDirect3DSwapChain9Ex *original, const std::shared_ptr<reshade::d3d9::runtime_d3d9> &runtime);

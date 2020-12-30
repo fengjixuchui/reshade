@@ -25,19 +25,13 @@ Direct3DSwapChain9::Direct3DSwapChain9(Direct3DDevice9 *device, IDirect3DSwapCha
 
 bool Direct3DSwapChain9::is_presenting_entire_surface(const RECT *source_rect, HWND hwnd)
 {
-	if (source_rect == nullptr)
+	if (source_rect == nullptr || hwnd == nullptr)
 		return true;
 
-	if (hwnd != nullptr)
-	{
-		RECT window_rect = {};
-		GetClientRect(hwnd, &window_rect);
-		if (source_rect->left == window_rect.left && source_rect->top == window_rect.top &&
-			source_rect->right == window_rect.right && source_rect->bottom == window_rect.bottom)
-			return true;
-	}
-
-	return false;
+	RECT window_rect = {};
+	GetClientRect(hwnd, &window_rect);
+	return source_rect->left == window_rect.left && source_rect->top == window_rect.top &&
+	       source_rect->right == window_rect.right && source_rect->bottom == window_rect.bottom;
 }
 
 bool Direct3DSwapChain9::check_and_upgrade_interface(REFIID riid)
@@ -117,7 +111,7 @@ HRESULT STDMETHODCALLTYPE Direct3DSwapChain9::Present(const RECT *pSourceRect, c
 	// Only call into runtime if the entire surface is presented, to avoid partial updates messing up effects and the GUI
 	if (is_presenting_entire_surface(pSourceRect, hDestWindowOverride))
 		_runtime->on_present();
-	_device->_buffer_detection.reset(false);
+	_device->_state.reset(false);
 
 	return _orig->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
 }

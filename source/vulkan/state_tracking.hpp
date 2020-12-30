@@ -10,7 +10,7 @@
 
 namespace reshade::vulkan
 {
-	class buffer_detection
+	class state_tracking
 	{
 	public:
 		struct draw_stats
@@ -27,12 +27,15 @@ namespace reshade::vulkan
 
 		void reset();
 
-		void merge(const buffer_detection &source);
+		void merge(const state_tracking &source);
 
 		void on_draw(uint32_t vertices);
 
 #if RESHADE_DEPTH
 		void on_set_depthstencil(VkImage depthstencil, VkImageLayout layout, const VkImageCreateInfo &create_info);
+
+		// Detection settings
+		bool use_aspect_ratio_heuristics = true;
 #endif
 
 	protected:
@@ -43,7 +46,7 @@ namespace reshade::vulkan
 #endif
 	};
 
-	class buffer_detection_context : public buffer_detection
+	class state_tracking_context : public state_tracking
 	{
 	public:
 		uint32_t total_vertices() const { return _stats.vertices; }

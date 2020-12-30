@@ -14,6 +14,33 @@
 #undef IDirect3D9_CreateDevice
 #undef IDirect3D9Ex_CreateDeviceEx
 
+static void dump_format(D3DFORMAT format)
+{
+	const char *format_string = nullptr;
+	switch (format)
+	{
+	case D3DFMT_UNKNOWN:
+		format_string = "D3DFMT_UNKNOWN";
+		break;
+	case D3DFMT_A8R8G8B8:
+		format_string = "D3DFMT_A8R8G8B8";
+		break;
+	case D3DFMT_X8R8G8B8:
+		format_string = "D3DFMT_X8R8G8B8";
+		break;
+	case D3DFMT_R5G6B5:
+		format_string = "D3DFMT_R5G6B5";
+		break;
+	case D3DFMT_X1R5G5B5:
+		format_string = "D3DFMT_X1R5G5B5";
+		break;
+	}
+
+	if (format_string != nullptr)
+		LOG(INFO) << "  | BackBufferFormat                        | " << std::setw(39) << format_string << " |";
+	else
+		LOG(INFO) << "  | BackBufferFormat                        | " << std::setw(39) << format << " |";
+}
 void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, IDirect3D9 *d3d, UINT adapter_index)
 {
 	LOG(INFO) << "> Dumping presentation parameters:";
@@ -22,7 +49,7 @@ void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, IDirect3D9 *d
 	LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 	LOG(INFO) << "  | BackBufferWidth                         | " << std::setw(39) << pp.BackBufferWidth << " |";
 	LOG(INFO) << "  | BackBufferHeight                        | " << std::setw(39) << pp.BackBufferHeight << " |";
-	LOG(INFO) << "  | BackBufferFormat                        | " << std::setw(39) << pp.BackBufferFormat << " |";
+	dump_format(pp.BackBufferFormat);
 	LOG(INFO) << "  | BackBufferCount                         | " << std::setw(39) << pp.BackBufferCount << " |";
 	LOG(INFO) << "  | MultiSampleType                         | " << std::setw(39) << pp.MultiSampleType << " |";
 	LOG(INFO) << "  | MultiSampleQuality                      | " << std::setw(39) << pp.MultiSampleQuality << " |";
@@ -36,46 +63,39 @@ void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, IDirect3D9 *d
 	LOG(INFO) << "  | PresentationInterval                    | " << std::setw(39) << std::hex << pp.PresentationInterval << std::dec << " |";
 	LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 
-	{ const reshade::ini_file config(g_reshade_base_path / L"ReShade.ini");
+	if (reshade::global_config().get("APP", "ForceVSync"))
+	{
+		pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+	}
 
-		if (bool force_vsync;
-			config.get("D3D9", "ForceVSync", force_vsync) && force_vsync)
-		{
-			pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
-		}
+	if (reshade::global_config().get("APP", "ForceWindowed"))
+	{
+		pp.Windowed = TRUE;
+		pp.FullScreen_RefreshRateInHz = 0;
+	}
+	if (reshade::global_config().get("APP", "ForceFullscreen"))
+	{
+		D3DDISPLAYMODE current_mode = {};
+		d3d->GetAdapterDisplayMode(adapter_index, &current_mode);
 
-		if (bool force_windowed;
-			config.get("D3D9", "ForceWindowed", force_windowed) && force_windowed)
-		{
-			pp.Windowed = TRUE;
-			pp.FullScreen_RefreshRateInHz = 0;
-		}
+		pp.BackBufferWidth = current_mode.Width;
+		pp.BackBufferHeight = current_mode.Height;
+		pp.BackBufferFormat = current_mode.Format;
+		pp.Windowed = FALSE;
+		pp.FullScreen_RefreshRateInHz = current_mode.RefreshRate;
+	}
 
-		if (bool force_fullscreen;
-			config.get("D3D9", "ForceFullscreen", force_fullscreen) && force_fullscreen)
-		{
-			D3DDISPLAYMODE current_mode = {};
-			d3d->GetAdapterDisplayMode(adapter_index, &current_mode);
+	if (unsigned int force_resolution[2] = {};
+		reshade::global_config().get("APP", "ForceResolution", force_resolution) &&
+		force_resolution[0] != 0 && force_resolution[1] != 0)
+	{
+		pp.BackBufferWidth = force_resolution[0];
+		pp.BackBufferHeight = force_resolution[1];
+	}
 
-			pp.BackBufferWidth = current_mode.Width;
-			pp.BackBufferHeight = current_mode.Height;
-			pp.BackBufferFormat = current_mode.Format;
-			pp.Windowed = FALSE;
-			pp.FullScreen_RefreshRateInHz = current_mode.RefreshRate;
-		}
-
-		if (unsigned int force_resolution[2];
-			config.get("D3D9", "ForceResolution", force_resolution) && force_resolution[0] != 0 && force_resolution[1] != 0)
-		{
-			pp.BackBufferWidth = force_resolution[0];
-			pp.BackBufferHeight = force_resolution[1];
-		}
-
-		if (bool force_10_bit_format;
-			config.get("D3D9", "Force10BitFormat", force_10_bit_format) && force_10_bit_format)
-		{
-			pp.BackBufferFormat = D3DFMT_A2R10G10B10;
-		}
+	if (reshade::global_config().get("APP", "Force10BitFormat"))
+	{
+		pp.BackBufferFormat = D3DFMT_A2R10G10B10;
 	}
 }
 void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, D3DDISPLAYMODEEX &fullscreen_desc, IDirect3D9Ex *d3d, UINT adapter_index)
@@ -105,7 +125,7 @@ static void init_runtime_d3d(T *&device, D3DDEVTYPE device_type, D3DPRESENT_PARA
 	// TODO: Make this configurable, since it prevents ReShade from being applied to video players.
 	if (pp.Flags & D3DPRESENTFLAG_VIDEO)
 	{
-		LOG(WARN) << "Skipping device because it uses a video swapchain.";
+		LOG(WARN) << "Skipping device because it uses a video swap chain.";
 		return;
 	}
 #endif
@@ -126,9 +146,9 @@ static void init_runtime_d3d(T *&device, D3DDEVTYPE device_type, D3DPRESENT_PARA
 
 	const auto device_proxy = new Direct3DDevice9(device, use_software_rendering);
 
-	const auto runtime = std::make_shared<reshade::d3d9::runtime_d3d9>(device, swapchain, &device_proxy->_buffer_detection);
+	const auto runtime = std::make_shared<reshade::d3d9::runtime_d3d9>(device, swapchain, &device_proxy->_state);
 	if (!runtime->on_init(pp))
-		LOG(ERROR) << "Failed to initialize Direct3D 9 runtime environment on runtime " << runtime.get() << '.';
+		LOG(ERROR) << "Failed to initialize Direct3D 9 runtime environment on runtime " << runtime.get() << '!';
 
 	device_proxy->_implicit_swapchain = new Direct3DSwapChain9(device_proxy, swapchain, runtime);
 
@@ -191,7 +211,7 @@ HRESULT STDMETHODCALLTYPE IDirect3D9_CreateDevice(IDirect3D9 *pD3D, UINT Adapter
 
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "IDirect3D9::CreateDevice" << " failed with error code " << hr << '!';
+		LOG(WARN) << "IDirect3D9::CreateDevice" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -243,7 +263,7 @@ HRESULT STDMETHODCALLTYPE IDirect3D9Ex_CreateDeviceEx(IDirect3D9Ex *pD3D, UINT A
 
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "IDirect3D9Ex::CreateDeviceEx" << " failed with error code " << hr << '!';
+		LOG(WARN) << "IDirect3D9Ex::CreateDeviceEx" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -278,7 +298,7 @@ HOOK_EXPORT     HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex *
 	const HRESULT hr = reshade::hooks::call(Direct3DCreate9Ex)(SDKVersion, ppD3D);
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "Direct3DCreate9Ex" << " failed with error code " << hr << '!';
+		LOG(WARN) << "Direct3DCreate9Ex" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -289,4 +309,18 @@ HOOK_EXPORT     HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex *
 	LOG(INFO) << "Returning IDirect3D9Ex object " << *ppD3D << '.';
 #endif
 	return hr;
+}
+
+HOOK_EXPORT IDirect3D9 *WINAPI Direct3DCreate9on12(UINT SDKVersion, struct D3D9ON12_ARGS *pOverrideList, UINT NumOverrideEntries) // Export ordinal 20
+{
+	LOG(INFO) << "Redirecting " << "Direct3DCreate9on12" << '(' << "SDKVersion = " << SDKVersion << ", pOverrideList = " << pOverrideList << ", NumOverrideEntries = " << NumOverrideEntries << ')' << " ...";
+
+	return reshade::hooks::call(Direct3DCreate9on12)(SDKVersion, pOverrideList, NumOverrideEntries);
+}
+
+HOOK_EXPORT     HRESULT WINAPI Direct3DCreate9on12Ex(UINT SDKVersion, struct D3D9ON12_ARGS *pOverrideList, UINT NumOverrideEntries, IDirect3D9Ex **ppOutputInterface) // Export ordinal 21
+{
+	LOG(INFO) << "Redirecting " << "Direct3DCreate9on12Ex" << '(' << "SDKVersion = " << SDKVersion << ", pOverrideList = " << pOverrideList << ", NumOverrideEntries = " << NumOverrideEntries << ", ppOutputInterface = " << ppOutputInterface << ')' << " ...";
+
+	return reshade::hooks::call(Direct3DCreate9on12Ex)(SDKVersion, pOverrideList, NumOverrideEntries, ppOutputInterface);
 }

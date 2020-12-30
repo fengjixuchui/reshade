@@ -22,42 +22,42 @@ thread_local bool g_in_dxgi_runtime = false;
 DXGISwapChain::DXGISwapChain(D3D10Device *device, IDXGISwapChain  *original, const std::shared_ptr<reshade::runtime> &runtime) :
 	_orig(original),
 	_interface_version(0),
-	_direct3d_device(device, false), // Explicitly add a reference to the device
+	_direct3d_object(device, false), // Explicitly add a reference to the device
 	_direct3d_version(10),
 	_runtime(runtime) {
-	assert(_orig != nullptr && _direct3d_device != nullptr && _runtime != nullptr);
+	assert(_orig != nullptr && _direct3d_object != nullptr && _runtime != nullptr);
 }
 DXGISwapChain::DXGISwapChain(D3D10Device *device, IDXGISwapChain1 *original, const std::shared_ptr<reshade::runtime> &runtime) :
 	_orig(original),
 	_interface_version(1),
-	_direct3d_device(device, false),
+	_direct3d_object(device, false),
 	_direct3d_version(10),
 	_runtime(runtime) {
-	assert(_orig != nullptr && _direct3d_device != nullptr && _runtime != nullptr);
+	assert(_orig != nullptr && _direct3d_object != nullptr && _runtime != nullptr);
 }
 DXGISwapChain::DXGISwapChain(D3D11Device *device, IDXGISwapChain  *original, const std::shared_ptr<reshade::runtime> &runtime) :
 	_orig(original),
 	_interface_version(0),
-	_direct3d_device(device, false),
+	_direct3d_object(device, false),
 	_direct3d_version(11),
 	_runtime(runtime) {
-	assert(_orig != nullptr && _direct3d_device != nullptr && _runtime != nullptr);
+	assert(_orig != nullptr && _direct3d_object != nullptr && _runtime != nullptr);
 }
 DXGISwapChain::DXGISwapChain(D3D11Device *device, IDXGISwapChain1 *original, const std::shared_ptr<reshade::runtime> &runtime) :
 	_orig(original),
 	_interface_version(1),
-	_direct3d_device(device, false),
+	_direct3d_object(device, false),
 	_direct3d_version(11),
 	_runtime(runtime) {
-	assert(_orig != nullptr && _direct3d_device != nullptr && _runtime != nullptr);
+	assert(_orig != nullptr && _direct3d_object != nullptr && _runtime != nullptr);
 }
-DXGISwapChain::DXGISwapChain(D3D12Device *device, IDXGISwapChain3 *original, const std::shared_ptr<reshade::runtime> &runtime) :
+DXGISwapChain::DXGISwapChain(D3D12CommandQueue *command_queue, IDXGISwapChain3 *original, const std::shared_ptr<reshade::runtime> &runtime) :
 	_orig(original),
 	_interface_version(3),
-	_direct3d_device(device, false),
+	_direct3d_object(command_queue, false),
 	_direct3d_version(12),
 	_runtime(runtime) {
-	assert(_orig != nullptr && _direct3d_device != nullptr && _runtime != nullptr);
+	assert(_orig != nullptr && _direct3d_object != nullptr && _runtime != nullptr);
 }
 
 void DXGISwapChain::runtime_reset()
@@ -101,7 +101,7 @@ void DXGISwapChain::runtime_resize()
 	}
 
 	if (!initialized)
-		LOG(ERROR) << "Failed to recreate Direct3D " << _direct3d_version << " runtime environment on runtime " << _runtime.get() << '.';
+		LOG(ERROR) << "Failed to recreate Direct3D " << _direct3d_version << " runtime environment on runtime " << _runtime.get() << '!';
 }
 void DXGISwapChain::runtime_present(UINT flags)
 {
@@ -117,19 +117,19 @@ void DXGISwapChain::runtime_present(UINT flags)
 	switch (_direct3d_version)
 	{
 	case 10: {
-		const auto device = static_cast<D3D10Device *>(_direct3d_device.get());
+		const auto device = static_cast<D3D10Device *>(_direct3d_object.get());
 		std::static_pointer_cast<reshade::d3d10::runtime_d3d10>(_runtime)->on_present();
-		device->_buffer_detection.reset(false);
+		device->_state.reset(false);
 		break; }
 	case 11: {
-		const auto device = static_cast<D3D11Device *>(_direct3d_device.get());
+		const auto device = static_cast<D3D11Device *>(_direct3d_object.get());
 		std::static_pointer_cast<reshade::d3d11::runtime_d3d11>(_runtime)->on_present();
-		device->_immediate_context->_buffer_detection.reset(false);
+		device->_immediate_context->_state.reset(false);
 		break; }
 	case 12: {
-		const auto device = static_cast<D3D12Device *>(_direct3d_device.get());
+		const auto command_queue = static_cast<D3D12CommandQueue *>(_direct3d_object.get());
 		std::static_pointer_cast<reshade::d3d12::runtime_d3d12>(_runtime)->on_present();
-		device->_buffer_detection.reset(false);
+		command_queue->_device->_state.reset(false);
 		break; }
 	}
 }
@@ -142,7 +142,7 @@ void DXGISwapChain::handle_runtime_loss(HRESULT hr)
 	// Handle scenarios where device is lost and just clean up all resources
 	if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
 	{
-		LOG(ERROR) << "Device was lost with " << hr << ". Destroying all resources and disabling ReShade.";
+		LOG(ERROR) << "Device was lost with " << hr << "! Destroying all resources and disabling ReShade.";
 
 		if (hr == DXGI_ERROR_DEVICE_REMOVED)
 		{
@@ -150,13 +150,13 @@ void DXGISwapChain::handle_runtime_loss(HRESULT hr)
 			switch (_direct3d_version)
 			{
 			case 10:
-				reason = static_cast<D3D10Device *>(_direct3d_device.get())->GetDeviceRemovedReason();
+				reason = static_cast<D3D10Device *>(_direct3d_object.get())->GetDeviceRemovedReason();
 				break;
 			case 11:
-				reason = static_cast<D3D11Device *>(_direct3d_device.get())->GetDeviceRemovedReason();
+				reason = static_cast<D3D11Device *>(_direct3d_object.get())->GetDeviceRemovedReason();
 				break;
 			case 12:
-				reason = static_cast<D3D12Device *>(_direct3d_device.get())->GetDeviceRemovedReason();
+				reason = static_cast<D3D12CommandQueue *>(_direct3d_object.get())->_device->GetDeviceRemovedReason();
 				break;
 			}
 
@@ -236,20 +236,20 @@ ULONG   STDMETHODCALLTYPE DXGISwapChain::Release()
 	{
 	case 10:
 		std::static_pointer_cast<reshade::d3d10::runtime_d3d10>(_runtime)->on_reset();
-		static_cast<D3D10Device *>(_direct3d_device.get())->_buffer_detection.reset(true);
+		static_cast<D3D10Device *>(_direct3d_object.get())->_state.reset(true);
 		break; 
 	case 11:
 		std::static_pointer_cast<reshade::d3d11::runtime_d3d11>(_runtime)->on_reset();
-		static_cast<D3D11Device *>(_direct3d_device.get())->_immediate_context->_buffer_detection.reset(true);
+		static_cast<D3D11Device *>(_direct3d_object.get())->_immediate_context->_state.reset(true);
 		break;
 	case 12:
 		std::static_pointer_cast<reshade::d3d12::runtime_d3d12>(_runtime)->on_reset();
-		static_cast<D3D12Device *>(_direct3d_device.get())->_buffer_detection.reset(true); // Release any live references to depth buffers etc.
+		static_cast<D3D12CommandQueue *>(_direct3d_object.get())->_device->_state.reset(true); // Release any live references to depth buffers etc.
 		break;
 	}
 
 	_runtime.reset();
-	_direct3d_device.reset();
+	_direct3d_object.reset();
 
 	// Only release internal reference after the runtime has been reset, so any references it held are cleaned up at this point
 	const ULONG ref_orig = _orig->Release();
@@ -283,7 +283,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::GetParent(REFIID riid, void **ppParent)
 
 HRESULT STDMETHODCALLTYPE DXGISwapChain::GetDevice(REFIID riid, void **ppDevice)
 {
-	return _direct3d_device->QueryInterface(riid, ppDevice);
+	return _direct3d_object->QueryInterface(riid, ppDevice);
 }
 
 HRESULT STDMETHODCALLTYPE DXGISwapChain::Present(UINT SyncInterval, UINT Flags)
@@ -338,7 +338,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::ResizeBuffers(UINT BufferCount, UINT Wi
 	const HRESULT hr = _orig->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
 	if (hr == DXGI_ERROR_INVALID_CALL) // Ignore invalid call errors since the device is still in a usable state afterwards
 	{
-		LOG(WARN) << "IDXGISwapChain::ResizeBuffers" << " failed with error code " << "DXGI_ERROR_INVALID_CALL" << '!';
+		LOG(WARN) << "IDXGISwapChain::ResizeBuffers" << " failed with error code " << "DXGI_ERROR_INVALID_CALL" << '.';
 	}
 	else if (FAILED(hr))
 	{
@@ -517,7 +517,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::ResizeBuffers1(UINT BufferCount, UINT W
 	const HRESULT hr = static_cast<IDXGISwapChain3 *>(_orig)->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, present_queues.data());
 	if (hr == DXGI_ERROR_INVALID_CALL)
 	{
-		LOG(WARN) << "IDXGISwapChain3::ResizeBuffers1" << " failed with error code " << "DXGI_ERROR_INVALID_CALL" << '!';
+		LOG(WARN) << "IDXGISwapChain3::ResizeBuffers1" << " failed with error code " << "DXGI_ERROR_INVALID_CALL" << '.';
 	}
 	else if (FAILED(hr))
 	{

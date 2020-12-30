@@ -6,28 +6,28 @@
 #pragma once
 
 #include "runtime.hpp"
-#include "vk_handle.hpp"
-#include "buffer_detection.hpp"
+#include "state_tracking.hpp"
 
 #pragma warning(push)
 #pragma warning(disable: 4100 4127 4324 4703) // Disable a bunch of warnings thrown by VMA code
 #include <vk_mem_alloc.h>
 #pragma warning(pop)
+#include <vk_layer_dispatch_table.h>
 
 namespace reshade::vulkan
 {
 	class runtime_vk : public runtime
 	{
-		static const uint32_t NUM_IMGUI_BUFFERS = 5;
-		static const uint32_t NUM_COMMAND_FRAMES = 5;
+		static const uint32_t NUM_IMGUI_BUFFERS = 4;
+		static const uint32_t NUM_COMMAND_FRAMES = 4; // Use power of two so that modulo can be replaced with bitwise operation
 
 	public:
-		runtime_vk(VkDevice device, VkPhysicalDevice physical_device, uint32_t queue_family_index, const VkLayerInstanceDispatchTable &instance_table, const VkLayerDispatchTable &device_table, buffer_detection_context *bdc);
+		runtime_vk(VkDevice device, VkPhysicalDevice physical_device, uint32_t queue_family_index, const VkLayerInstanceDispatchTable &instance_table, const VkLayerDispatchTable &device_table, state_tracking_context *state_tracking);
 		~runtime_vk();
 
 		bool on_init(VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR &desc, HWND hwnd);
 		void on_reset();
-		void on_present(VkQueue queue, uint32_t swapchain_image_index, const std::vector<VkSemaphore> &wait, VkSemaphore &signal);
+		void on_present(VkQueue queue, uint32_t swapchain_image_index, std::vector<VkSemaphore> &wait);
 
 		bool capture_screenshot(uint8_t *buffer) const override;
 
@@ -41,13 +41,17 @@ namespace reshade::vulkan
 		bool init_texture(texture &texture) override;
 		void upload_texture(const texture &texture, const uint8_t *pixels) override;
 		void destroy_texture(texture &texture) override;
-		void generate_mipmaps(const struct vulkan_tex_data *impl);
+		void generate_mipmaps(const struct tex_data *impl);
 
 		void render_technique(technique &technique) override;
 
 		bool begin_command_buffer() const;
 		void execute_command_buffer() const;
 		void wait_for_command_buffers();
+
+		void set_debug_name(uint64_t object, VkDebugReportObjectTypeEXT type, const char *name) const;
+		inline void set_debug_name_image(VkImage image, const char *name) const { set_debug_name((uint64_t)image, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, name); }
+		inline void set_debug_name_buffer(VkBuffer buffer, const char *name) const { set_debug_name((uint64_t)buffer, VK_DEBUG_REPORT_OBJECT_TYPE_BUFFER_EXT, name); }
 
 		VkImage create_image(uint32_t width, uint32_t height, uint32_t levels, VkFormat format,
 			VkImageUsageFlags usage, VmaMemoryUsage mem_usage,
@@ -63,7 +67,7 @@ namespace reshade::vulkan
 		const uint32_t _queue_family_index;
 		VkPhysicalDeviceProperties _device_props = {};
 		VkPhysicalDeviceMemoryProperties _memory_props = {};
-		buffer_detection_context *const _buffer_detection;
+		state_tracking_context &_state_tracking;
 
 		VkFence _cmd_fences[NUM_COMMAND_FRAMES + 1] = {};
 		VkSemaphore _cmd_semaphores[NUM_COMMAND_FRAMES * 2] = {};
@@ -71,6 +75,9 @@ namespace reshade::vulkan
 		mutable std::pair<VkCommandBuffer, bool> _cmd_buffers[NUM_COMMAND_FRAMES] = {};
 		uint32_t _cmd_index = 0;
 		uint32_t _swap_index = 0;
+#ifndef NDEBUG
+		mutable bool _wait_for_idle_happened = false;
+#endif
 
 		VkFormat _backbuffer_format = VK_FORMAT_UNDEFINED;
 		VkExtent2D _render_area = {};
@@ -88,7 +95,7 @@ namespace reshade::vulkan
 		VkImage _effect_stencil = VK_NULL_HANDLE;
 		VkFormat _effect_stencil_format = VK_FORMAT_UNDEFINED;
 		VkImageView _effect_stencil_view = VK_NULL_HANDLE;
-		std::vector<struct vulkan_effect_data> _effect_data;
+		std::vector<struct effect_data> _effect_data;
 		VkDescriptorPool _effect_descriptor_pool = VK_NULL_HANDLE;
 		VkDescriptorSetLayout _effect_descriptor_layout = VK_NULL_HANDLE;
 		std::unordered_map<size_t, VkSampler> _effect_sampler_states;
@@ -115,10 +122,9 @@ namespace reshade::vulkan
 #endif
 
 #if RESHADE_DEPTH
-		void draw_depth_debug_menu(buffer_detection_context &tracker);
-		void update_depth_image_bindings(buffer_detection::depthstencil_info info);
+		void draw_depth_debug_menu();
+		void update_depth_image_bindings(state_tracking::depthstencil_info info);
 
-		bool _use_aspect_ratio_heuristics = true;
 		VkImage _depth_image = VK_NULL_HANDLE;
 		VkImage _depth_image_override = VK_NULL_HANDLE;
 		VkImageView _depth_image_view = VK_NULL_HANDLE;

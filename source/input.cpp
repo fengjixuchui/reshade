@@ -3,11 +3,10 @@
  * License: https://github.com/crosire/reshade#license
  */
 
-#include "dll_log.hpp"
 #include "input.hpp"
+#include "dll_log.hpp"
 #include "hook_manager.hpp"
 #include <mutex>
-#include <cassert>
 #include <algorithm>
 #include <unordered_map>
 #include <Windows.h>
@@ -132,11 +131,11 @@ bool reshade::input::handle_window_message(const void *message_data)
 	// At this point we have a shared pointer to the input object and no longer reference any memory from the windows list, so can release the lock
 	lock.unlock();
 
-	// Prevent input threads from modifying input while it is accessed elsewhere
-	const std::lock_guard<std::mutex> input_lock = input->lock();
-
 	// Calculate window client mouse position
 	ScreenToClient(static_cast<HWND>(input->_window), &details.pt);
+
+	// Prevent input threads from modifying input while it is accessed elsewhere
+	const std::lock_guard<std::mutex> input_lock = input->lock();
 
 	input->_mouse_position[0] = details.pt.x;
 	input->_mouse_position[1] = details.pt.y;
@@ -277,6 +276,9 @@ bool reshade::input::is_key_pressed(unsigned int keycode) const
 }
 bool reshade::input::is_key_pressed(unsigned int keycode, bool ctrl, bool shift, bool alt, bool force_modifiers) const
 {
+	if (keycode == 0)
+		return false;
+
 	const bool key_down = is_key_pressed(keycode), ctrl_down = is_key_down(VK_CONTROL), shift_down = is_key_down(VK_SHIFT), alt_down = is_key_down(VK_MENU);
 	if (force_modifiers) // Modifier state is required to match
 		return key_down && (ctrl == ctrl_down && shift == shift_down && alt == alt_down);
@@ -466,22 +468,58 @@ static inline bool is_blocking_keyboard_input()
 
 HOOK_EXPORT BOOL WINAPI HookGetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
 {
+#if 1
 	// Implement 'GetMessage' with a timeout (see also DLL_PROCESS_DETACH in dllmain.cpp for more explanation)
 	while (!PeekMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE) && g_module_handle != nullptr)
 		MsgWaitForMultipleObjects(0, nullptr, FALSE, 1000, QS_ALLINPUT);
 
 	if (g_module_handle == nullptr)
 		std::memset(lpMsg, 0, sizeof(MSG)); // Clear message structure, so application does not process it
+#else
+	static const auto trampoline = reshade::hooks::call(HookGetMessageA);
+	const BOOL result = trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+	if (result < 0) // If there is an error, the return value is negative (https://docs.microsoft.com/windows/win32/api/winuser/nf-winuser-getmessage)
+		return result;
+
+	assert(lpMsg != nullptr);
+
+	if (lpMsg->hwnd != nullptr && reshade::input::handle_window_message(lpMsg))
+	{
+		// We still want 'WM_CHAR' messages, so translate message
+		TranslateMessage(lpMsg);
+
+		// Change message so it is ignored by the recipient window
+		lpMsg->message = WM_NULL;
+	}
+#endif
 
 	return lpMsg->message != WM_QUIT;
 }
 HOOK_EXPORT BOOL WINAPI HookGetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
 {
+#if 1
 	while (!PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE) && g_module_handle != nullptr)
 		MsgWaitForMultipleObjects(0, nullptr, FALSE, 1000, QS_ALLINPUT);
 
 	if (g_module_handle == nullptr)
 		std::memset(lpMsg, 0, sizeof(MSG));
+#else
+	static const auto trampoline = reshade::hooks::call(HookGetMessageW);
+	const BOOL result = trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+	if (result < 0)
+		return result;
+
+	assert(lpMsg != nullptr);
+
+	if (lpMsg->hwnd != nullptr && reshade::input::handle_window_message(lpMsg))
+	{
+		// We still want 'WM_CHAR' messages, so translate message
+		TranslateMessage(lpMsg);
+
+		// Change message so it is ignored by the recipient window
+		lpMsg->message = WM_NULL;
+	}
+#endif
 
 	return lpMsg->message != WM_QUIT;
 }
@@ -571,7 +609,7 @@ HOOK_EXPORT BOOL WINAPI HookRegisterRawInputDevices(PCRAWINPUTDEVICE pRawInputDe
 
 	if (!reshade::hooks::call(HookRegisterRawInputDevices)(pRawInputDevices, uiNumDevices, cbSize))
 	{
-		LOG(WARN) << "RegisterRawInputDevices" << " failed with error code " << GetLastError() << '!';
+		LOG(WARN) << "RegisterRawInputDevices" << " failed with error code " << GetLastError() << '.';
 		return FALSE;
 	}
 

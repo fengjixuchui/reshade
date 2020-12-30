@@ -4,13 +4,13 @@
  */
 
 #include "runtime_config.hpp"
+#include <cassert>
 #include <fstream>
 #include <sstream>
 
 static std::unordered_map<std::wstring, reshade::ini_file> g_ini_cache;
 
-reshade::ini_file::ini_file(const std::filesystem::path &path)
-	: _path(path)
+reshade::ini_file::ini_file(const std::filesystem::path &path) : _path(path)
 {
 	load();
 }
@@ -21,40 +21,20 @@ reshade::ini_file::~ini_file()
 
 void reshade::ini_file::load()
 {
-	enum class condition { open, not_found, blocked, unknown };
-	condition condition = condition::unknown;
-
 	std::error_code ec;
-
 	const std::filesystem::file_time_type modified_at = std::filesystem::last_write_time(_path, ec);
-	if (ec.value() == 0)
-		condition = condition::open;
-	else if (ec.value() == 0x2 || ec.value() == 0x3) // 0x2: ERROR_FILE_NOT_FOUND, 0x3: ERROR_PATH_NOT_FOUND
-		condition = condition::not_found;
-
-	if (condition == condition::open && _modified_at >= modified_at)
-		return;
+	if (ec || _modified_at >= modified_at)
+		return; // Skip loading if there was an error (e.g. file does not exist) or there was no modification to the file since it was last loaded
 
 	std::ifstream file;
-
-	if (condition == condition::open)
-		if (file.open(_path); file.fail())
-			condition = condition::blocked;
-
-	if (condition == condition::blocked || condition == condition::unknown)
+	if (file.open(_path); !file)
 		return;
 
 	_sections.clear();
 	_modified = false;
-
-	if (condition == condition::not_found)
-		return;
-
-	assert(std::filesystem::file_size(_path, ec) > 0);
-
 	_modified_at = modified_at;
-	file.imbue(std::locale("en-us.UTF-8"));
 
+	file.imbue(std::locale("en-us.UTF-8"));
 	// Remove BOM (0xefbbbf means 0xfeff)
 	if (file.get() != 0xef || file.get() != 0xbb || file.get() != 0xbf)
 		file.seekg(0, std::ios::beg);
@@ -76,7 +56,6 @@ void reshade::ini_file::load()
 
 		// Read section content
 		const auto assign_index = line.find('=');
-
 		if (assign_index != std::string::npos)
 		{
 			const std::string key = trim(line.substr(0, assign_index));
@@ -121,14 +100,13 @@ bool reshade::ini_file::save()
 	if (!_modified)
 		return true;
 
+	// Reset state even on failure to avoid 'flush_cache' repeatedly trying and failing to save
+	_modified = false;
+
 	std::error_code ec;
-	std::filesystem::file_time_type modified_at = std::filesystem::last_write_time(_path, ec);
-	if (ec.value() == 0 && modified_at >= _modified_at)
-	{
-		// File exists and was modified on disk and may have different data, so cannot save
-		_modified = false;
-		return true;
-	}
+	const std::filesystem::file_time_type modified_at = std::filesystem::last_write_time(_path, ec);
+	if (!ec && modified_at >= _modified_at)
+		return true; // File exists and was modified on disk and therefore may have different data, so cannot save
 
 	std::stringstream data;
 	std::vector<std::string> section_names, key_names;
@@ -193,24 +171,16 @@ bool reshade::ini_file::save()
 	}
 
 	std::ofstream file(_path);
-	if (!file.is_open() || file.fail())
-	{
-		// Reset state to avoid cache flushing to repeatedly save the file
-		_modified = false;
+	if (!file)
 		return false;
-	}
-
-	file.rdbuf()->pubsetbuf(nullptr, 0);
 
 	const std::string str = data.str();
 	file.imbue(std::locale("en-us.UTF-8"));
 	file.write(str.data(), str.size());
 
-	// Keep the modified flag if saving was not successful, so to try again later
-	if (_modified = file.fail(); _modified)
-		std::filesystem::last_write_time(_path, modified_at, ec);
-	else if (modified_at = std::filesystem::last_write_time(_path, ec); ec.value() == 0)
-		_modified_at = modified_at;
+	// Flush stream to disk before updating last write time
+	file.close();
+	_modified_at = std::filesystem::last_write_time(_path, ec);
 
 	assert(std::filesystem::file_size(_path, ec) > 0);
 
@@ -229,12 +199,12 @@ reshade::ini_file &reshade::ini_file::load_cache(const std::filesystem::path &pa
 bool reshade::ini_file::flush_cache()
 {
 	bool success = true;
-	const auto now = std::filesystem::file_time_type::clock::now();
 
 	// Save all files that were modified in one second intervals
 	for (std::pair<const std::wstring, ini_file> &file : g_ini_cache)
 	{
-		if (file.second._modified && (now - file.second._modified_at) > std::chrono::seconds(1))
+		// Check modified status before requesting file time, since the latter is costly and therefore should be avoided when not necessary
+		if (file.second._modified && (std::filesystem::file_time_type::clock::now() - file.second._modified_at) > std::chrono::seconds(1))
 			success &= file.second.save();
 	}
 
@@ -244,4 +214,12 @@ bool reshade::ini_file::flush_cache(const std::filesystem::path &path)
 {
 	const auto it = g_ini_cache.find(path);
 	return it != g_ini_cache.end() && it->second.save();
+}
+
+reshade::ini_file &reshade::global_config()
+{
+	std::filesystem::path config_path = g_reshade_dll_path;
+	config_path.replace_extension(L".ini");
+	static reshade::ini_file config(config_path); // Load once on first use
+	return config;
 }

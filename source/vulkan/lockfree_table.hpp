@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <utility>
+#include <cassert>
 
 /// <summary>
 /// A simple lock-free linear search table.
@@ -55,53 +56,17 @@ public:
 		}
 
 		assert(false);
-		return _default; // Fall back if table is key does not exist
+		return default_value(); // Fall back if table is key does not exist
 	}
 
-	/// <summary>
-	/// Adds a new key-value pair to the table.
-	/// </summary>
-	/// <param name="key">The key to add.</param>
-	/// <returns>A reference to the newly added value.</returns>
-	TValue &emplace(TKey key)
-	{
-		assert(key != no_value && key != update_value);
-
-		size_t start_index = 0;
-		if constexpr (MAX_ENTRIES > 512)
-			start_index = std::hash<TKey>()(key) % (MAX_ENTRIES / 2);
-
-		// Create a pointer to the new value
-		TValue *new_value = new TValue();
-
-		for (size_t i = start_index; i < MAX_ENTRIES; ++i)
-		{
-			// Load and check before doing an expensive CAS
-			if (TKey test_key = _data[i].first.load(std::memory_order_relaxed);
-				test_key == no_value && // Check if the entry is empty and then do the CAS to occupy it
-				_data[i].first.compare_exchange_strong(test_key, update_value, std::memory_order_relaxed))
-			{
-				_data[i].second = new_value;
-
-				// Now that the new value is stored, make this entry available
-				_data[i].first.store(key, std::memory_order_release);
-
-				return *new_value;
-			}
-		}
-
-		delete new_value;
-
-		assert(false);
-		return _default; // Fall back if table is full
-	}
 	/// <summary>
 	/// Adds the specified key-value pair to the table.
 	/// </summary>
 	/// <param name="key">The key to add.</param>
-	/// <param name="value">The value to add.</param>
+	/// <param name="args">The constructor arguments to use for creation.</param>
 	/// <returns>A reference to the newly added value.</returns>
-	TValue &emplace(TKey key, const TValue &value)
+	template <typename... Args>
+	TValue &emplace(TKey key, Args... args)
 	{
 		assert(key != no_value && key != update_value);
 
@@ -110,7 +75,7 @@ public:
 			start_index = std::hash<TKey>()(key) % (MAX_ENTRIES / 2);
 
 		// Create a pointer to the new value using copy construction
-		TValue *new_value = new TValue(value);
+		TValue *new_value = new TValue(std::forward<Args>(args)...);
 
 		for (size_t i = start_index; i < MAX_ENTRIES; ++i)
 		{
@@ -129,7 +94,7 @@ public:
 		delete new_value;
 
 		assert(false);
-		return _default; // Fall back if table is full
+		return default_value(); // Fall back if table is full
 	}
 
 	/// <summary>
@@ -222,6 +187,11 @@ public:
 	}
 
 private:
-	mutable TValue _default = {};
+	static inline TValue &default_value()
+	{
+		// Make default value thread local, so no data races occur after multiple threads failed to access a value
+		static thread_local TValue _ = {}; return _;
+	}
+
 	std::pair<std::atomic<TKey>, TValue *> _data[MAX_ENTRIES];
 };

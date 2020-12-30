@@ -12,7 +12,7 @@
 
 namespace reshade::d3d10
 {
-	class buffer_detection
+	class state_tracking
 	{
 	public:
 		struct draw_stats
@@ -28,7 +28,7 @@ namespace reshade::d3d10
 			std::vector<draw_stats> clears;
 		};
 
-		explicit buffer_detection(ID3D10Device *device) : _device(device) {}
+		explicit state_tracking(ID3D10Device *device) : _device(device) {}
 
 		UINT total_vertices() const { return _stats.vertices; }
 		UINT total_drawcalls() const { return _stats.drawcalls; }
@@ -41,6 +41,7 @@ namespace reshade::d3d10
 
 		// Detection Settings
 		bool preserve_depth_buffers = false;
+		bool use_aspect_ratio_heuristics = true;
 		std::pair<ID3D10Texture2D *, UINT> depthstencil_clear_index = { nullptr, 0 };
 
 		const auto &depth_buffer_counters() const { return _counters_per_used_depth_texture; }

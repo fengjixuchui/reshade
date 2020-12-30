@@ -3,11 +3,10 @@
  * License: https://github.com/crosire/reshade#license
  */
 
+#include "version.h"
 #include "dll_log.hpp"
 #include "hook_manager.hpp"
 #include "runtime_config.hpp"
-#include "version.h"
-#include <cassert>
 #include <Psapi.h>
 #include <Windows.h>
 
@@ -16,102 +15,94 @@ std::filesystem::path g_reshade_dll_path;
 std::filesystem::path g_reshade_base_path;
 std::filesystem::path g_target_executable_path;
 
-static bool test_path(std::filesystem::path &path, const bool is_directory = true, const std::filesystem::path &base = g_reshade_dll_path.parent_path())
+/// <summary>
+/// Checks whether the current operation system is Windows 7 or earlier.
+/// </summary>
+bool is_windows7()
 {
-	if (path.is_relative())
-		path = base / path;
+	ULONGLONG condition = 0;
+	VER_SET_CONDITION(condition, VER_MAJORVERSION, VER_LESS_EQUAL);
+	VER_SET_CONDITION(condition, VER_MINORVERSION, VER_LESS_EQUAL);
 
-	WCHAR buf[4096];
-	if (!GetLongPathNameW(path.c_str(), buf, ARRAYSIZE(buf)))
-		return false;
-	path = buf;
-	path = path.lexically_normal();
-	if (!path.has_stem()) // Remove trailing slash
-		path = path.parent_path();
-
-	std::error_code ec;
-	return is_directory ? std::filesystem::is_directory(path, ec) : std::filesystem::exists(path, ec);
+	OSVERSIONINFOEX verinfo_windows7 = { sizeof(OSVERSIONINFOEX), 6, 1 };
+	return VerifyVersionInfo(&verinfo_windows7, VER_MAJORVERSION | VER_MINORVERSION, condition) != FALSE;
 }
-static bool resolve_env_path(std::filesystem::path &path)
+
+/// <summary>
+/// Expands any environment variables in the path (like "%userprofile%") and checks whether it points towards an existing directory.
+/// </summary>
+static bool resolve_env_path(std::filesystem::path &path, const std::filesystem::path &base = g_reshade_dll_path.parent_path())
 {
 	WCHAR buf[4096];
 	if (!ExpandEnvironmentStringsW(path.c_str(), buf, ARRAYSIZE(buf)))
 		return false;
 	path = buf;
-	return test_path(path);
+
+	if (path.is_relative())
+		path = base / path;
+
+	if (!GetLongPathNameW(path.c_str(), buf, ARRAYSIZE(buf)))
+		return false;
+	path = buf;
+
+	path = path.lexically_normal();
+	if (!path.has_stem()) // Remove trailing slash
+		path = path.parent_path();
+
+	std::error_code ec;
+	return std::filesystem::is_directory(path, ec);
 }
 
-static void load_global_config()
+/// <summary>
+/// Returns the path that should be used as base for relative paths.
+/// </summary>
+std::filesystem::path get_base_path()
 {
-	std::filesystem::path config_path = g_reshade_dll_path.filename().replace_extension(L".ini");
-	if (test_path(config_path, false))
-	{
-		const reshade::ini_file &config = reshade::ini_file::load_cache(config_path);
+	std::filesystem::path result;
 
-		if (std::filesystem::path base_path;
-			config.get("INSTALL", "BasePath", base_path) && resolve_env_path(base_path))
-			g_reshade_base_path = std::move(base_path);
+	if (reshade::global_config().get("INSTALL", "BasePath", result) && resolve_env_path(result))
+		return result;
+
+	WCHAR buf[4096] = L"";
+	if (GetEnvironmentVariableW(L"RESHADE_BASE_PATH_OVERRIDE", buf, ARRAYSIZE(buf)) && resolve_env_path(result = buf))
+		return result;
+
+	std::error_code ec;
+	if (std::filesystem::exists(reshade::global_config().path(), ec) || !std::filesystem::exists(g_target_executable_path.parent_path() / L"ReShade.ini", ec))
+	{
+		return g_reshade_dll_path.parent_path();
 	}
-
-	if (g_reshade_base_path.empty())
+	else
 	{
-		WCHAR buf[4096] = L"";
-		if (std::filesystem::path env_path;
-			GetEnvironmentVariableW(L"RESHADE_BASE_PATH_OVERRIDE", buf, ARRAYSIZE(buf)) && resolve_env_path(env_path = buf))
-		{
-			g_reshade_base_path = std::move(env_path);
-		}
-		else
-		{
-			std::error_code ec;
-			if (std::filesystem::exists(config_path, ec) || !std::filesystem::exists(g_target_executable_path.parent_path() / L"ReShade.ini", ec))
-			{
-				g_reshade_base_path = g_reshade_dll_path.parent_path();
-			}
-			else
-			{
-				// Use target executable directory when a unique configuration already exists
-				g_reshade_base_path = g_target_executable_path.parent_path();
-			}
-		}
+		// Use target executable directory when a unique configuration already exists
+		return g_target_executable_path.parent_path();
 	}
 }
 
+/// <summary>
+/// Returns the path to the "System32" directory or the module path from global configuration if it exists.
+/// </summary>
 std::filesystem::path get_system_path()
 {
-	static std::filesystem::path system_path;
-	if (!system_path.empty())
-		return system_path; // Return the cached system path
+	static std::filesystem::path result;
+	if (!result.empty())
+		return result; // Return the cached path if it exists
 
-	std::filesystem::path config_path = g_reshade_dll_path.filename().replace_extension(L".ini");
-	if (test_path(config_path, false))
-	{
-		const reshade::ini_file &config = reshade::ini_file::load_cache(config_path);
+	if (reshade::global_config().get("INSTALL", "ModulePath", result) && resolve_env_path(result))
+		return result;
 
-		if (std::filesystem::path module_path;
-			config.get("INSTALL", "ModulePath", module_path) && resolve_env_path(module_path))
-			system_path = std::move(module_path);
-	}
+	WCHAR buf[4096] = L"";
+	if (GetEnvironmentVariableW(L"RESHADE_MODULE_PATH_OVERRIDE", buf, ARRAYSIZE(buf)) && resolve_env_path(result = buf))
+		return result;
 
-	if (system_path.empty())
-	{
-		WCHAR buf[4096] = L"";
-		if (std::filesystem::path env_path;
-			GetEnvironmentVariableW(L"RESHADE_MODULE_PATH_OVERRIDE", buf, ARRAYSIZE(buf)) && resolve_env_path(env_path = buf))
-		{
-			system_path = std::move(env_path);
-		}
-		else
-		{
-			// First try environment variable, use system directory if it does not exist or is empty
-			GetSystemDirectoryW(buf, ARRAYSIZE(buf));
-			system_path = buf;
-		}
-	}
-
-	return system_path;
+	// First try environment variable, use system directory if it does not exist or is empty
+	GetSystemDirectoryW(buf, ARRAYSIZE(buf));
+	return result = buf;
 }
 
+/// <summary>
+/// Returns the path to the module file identified by the specified <paramref name="module"/> handle.
+/// </summary>
 static inline std::filesystem::path get_module_path(HMODULE module)
 {
 	WCHAR buf[4096];
@@ -125,10 +116,7 @@ static inline std::filesystem::path get_module_path(HMODULE module)
 #  include "d3d12/runtime_d3d12.hpp"
 #  include "opengl/runtime_gl.hpp"
 #  include "vulkan/runtime_vk.hpp"
-
-#  if RESHADE_D3D12ON7
-#    include <D3D12Downlevel.h>
-#  endif
+#  include <D3D12Downlevel.h>
 
 #  ifdef NDEBUG
 	#define HCHECK(exp) exp
@@ -143,8 +131,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 	g_module_handle = hInstance;
 	g_reshade_dll_path = get_module_path(hInstance);
 	g_target_executable_path = get_module_path(hInstance);
+	g_reshade_base_path = get_base_path();
 
-	load_global_config();
 	log::open(g_reshade_base_path / g_reshade_dll_path.filename().replace_extension(L".log"));
 
 	hooks::register_module("user32.dll");
@@ -330,14 +318,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
 		HCHECK(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)));
 
-#  if RESHADE_D3D12ON7
 		// Check if this device was created using d3d12on7 on Windows 7
 		// See https://microsoft.github.io/DirectX-Specs/d3d/D3D12onWin7.html for more information
 		com_ptr<ID3D12DeviceDownlevel> downlevel;
 		const bool is_d3d12on7 = SUCCEEDED(device->QueryInterface(&downlevel));
-#  else
-		const bool is_d3d12on7 = false;
-#  endif
+		downlevel.reset();
 
 		{   D3D12_COMMAND_QUEUE_DESC desc = { D3D12_COMMAND_LIST_TYPE_DIRECT };
 			HCHECK(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&command_queue)));
@@ -446,7 +431,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 			ID3D12CommandList *const cmd_list = cmd_lists[swap_index].get();
 			command_queue->ExecuteCommandLists(1, &cmd_list);
 
-#  if RESHADE_D3D12ON7
 			if (is_d3d12on7)
 			{
 				// Create a dummy list to pass into present
@@ -460,9 +444,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 				HCHECK(queue_downlevel->Present(dummy_list.get(), backbuffers[swap_index].get(), window_handle, D3D12_DOWNLEVEL_PRESENT_FLAG_WAIT_FOR_VBLANK));
 			}
 			else
-#  endif
+			{
 				// Synchronization is handled in "runtime_d3d12::on_present"
 				HCHECK(swapchain->Present(1, 0));
+			}
 		}
 
 		reshade::hooks::uninstall();
@@ -782,7 +767,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 				present_res = VK_CALL_CMD(vkQueuePresentKHR, device, queue, &present_info);
 			}
 
-			// Ignore out of date errors during presentation, since swapchain will be recreated on next minimize/maximize event anyway
+			// Ignore out of date errors during presentation, since swap chain will be recreated on next minimize/maximize event anyway
 			if (present_res != VK_SUBOPTIMAL_KHR && present_res != VK_ERROR_OUT_OF_DATE_KHR)
 				VK_CHECK(present_res);
 		}
@@ -828,11 +813,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 	switch (fdwReason)
 	{
 	case DLL_PROCESS_ATTACH:
+		// Do NOT call 'DisableThreadLibraryCalls', since we are linking against the static CRT, which requires the thread notifications to work properly
+		// It does not do anything when static TLS is used anyway, which is the case (see https://docs.microsoft.com/windows/win32/api/libloaderapi/nf-libloaderapi-disablethreadlibrarycalls)
 		g_module_handle = hModule;
 		g_reshade_dll_path = get_module_path(hModule);
 		g_target_executable_path = get_module_path(nullptr);
+		g_reshade_base_path = get_base_path(); // Needs to happen after DLL and executable path are set (since those are referenced in 'get_base_path')
 
-		load_global_config();
 		log::open(g_reshade_base_path / g_reshade_dll_path.filename().replace_extension(L".log"));
 
 #  ifdef WIN64
@@ -846,7 +833,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 			// Ignore debugging and some common language exceptions
 			if (const DWORD code = ex->ExceptionRecord->ExceptionCode;
 				code == CONTROL_C_EXIT || code == 0x406D1388 /* SetThreadName */ ||
-				code == DBG_PRINTEXCEPTION_C || code == DBG_PRINTEXCEPTION_WIDE_C ||
+				code == DBG_PRINTEXCEPTION_C || code == DBG_PRINTEXCEPTION_WIDE_C || code == STATUS_BREAKPOINT ||
 				code == 0xE0434352 /* CLR exception */ ||
 				code == 0xE06D7363 /* Visual C++ exception */)
 				goto continue_search;
@@ -906,17 +893,23 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 			}
 		}
 
-		hooks::register_module("user32.dll");
-		hooks::register_module("ws2_32.dll");
+		hooks::register_module(L"user32.dll");
+		hooks::register_module(L"ws2_32.dll");
 
-		hooks::register_module(get_system_path() / "d2d1.dll");
-		hooks::register_module(get_system_path() / "d3d9.dll");
-		hooks::register_module(get_system_path() / "d3d10.dll");
-		hooks::register_module(get_system_path() / "d3d10_1.dll");
-		hooks::register_module(get_system_path() / "d3d11.dll");
-		hooks::register_module(get_system_path() / "d3d12.dll");
-		hooks::register_module(get_system_path() / "dxgi.dll");
-		hooks::register_module(get_system_path() / "opengl32.dll");
+		hooks::register_module(get_system_path() / L"d2d1.dll");
+		hooks::register_module(get_system_path() / L"d3d9.dll");
+		hooks::register_module(get_system_path() / L"d3d10.dll");
+		hooks::register_module(get_system_path() / L"d3d10_1.dll");
+		hooks::register_module(get_system_path() / L"d3d11.dll");
+
+		// On Windows 7 the d3d12on7 module is not in the system path, so register to hook any d3d12.dll loaded instead
+		if (is_windows7() && _wcsicmp(g_reshade_dll_path.stem().c_str(), L"d3d12") != 0)
+			hooks::register_module(L"d3d12.dll");
+		else
+			hooks::register_module(get_system_path() / L"d3d12.dll");
+
+		hooks::register_module(get_system_path() / L"dxgi.dll");
+		hooks::register_module(get_system_path() / L"opengl32.dll");
 		// Do not register Vulkan hooks, since Vulkan layering mechanism is used instead
 
 		LOG(INFO) << "Initialized.";
@@ -926,10 +919,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 
 		hooks::uninstall();
 
-#  ifndef NDEBUG
-		RemoveVectoredExceptionHandler(g_exception_handler_handle);
-#  endif
-
 		// Module is now invalid, so break out of any message loops that may still have it in the call stack (see 'HookGetMessage' implementation in input.cpp)
 		// This is necessary since a different thread may have called into the 'GetMessage' hook from ReShade, but not receive a message until after the module was unloaded
 		// At that point it would return to code that was already unloaded and crash
@@ -938,6 +927,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 		// This duration has to be slightly larger than the timeout in 'HookGetMessage' to ensure success
 		// It should also be large enough to cover any potential other calls to previous hooks that may still be in flight from other threads
 		Sleep(1050);
+
+#  ifndef NDEBUG
+		RemoveVectoredExceptionHandler(g_exception_handler_handle);
+#  endif
 
 		LOG(INFO) << "Finished exiting.";
 		break;

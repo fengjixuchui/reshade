@@ -13,13 +13,13 @@
 
 namespace reshade::d3d9
 {
-	struct d3d9_tex_data
+	struct tex_data
 	{
 		com_ptr<IDirect3DTexture9> texture;
 		com_ptr<IDirect3DSurface9> surface;
 	};
 
-	struct d3d9_pass_data
+	struct pass_data
 	{
 		com_ptr<IDirect3DStateBlock9> stateblock;
 		com_ptr<IDirect3DPixelShader9> pixel_shader;
@@ -28,23 +28,20 @@ namespace reshade::d3d9
 		IDirect3DTexture9 *sampler_textures[16] = {};
 	};
 
-	struct d3d9_technique_data
+	struct technique_data
 	{
 		DWORD num_samplers = 0;
 		DWORD sampler_states[16][12] = {};
 		IDirect3DTexture9 *sampler_textures[16] = {};
 		DWORD constant_register_count = 0;
-		std::vector<d3d9_pass_data> passes;
+		std::vector<pass_data> passes;
 	};
 }
 
-reshade::d3d9::runtime_d3d9::runtime_d3d9(IDirect3DDevice9 *device, IDirect3DSwapChain9 *swapchain, buffer_detection *bdc) :
-	_device(device), _swapchain(swapchain), _buffer_detection(bdc),
-	_app_state(device)
+reshade::d3d9::runtime_d3d9::runtime_d3d9(IDirect3DDevice9 *device, IDirect3DSwapChain9 *swapchain, state_tracking *state_tracking) :
+	_app_state(device), _state_tracking(*state_tracking), _device(device), _swapchain(swapchain)
 {
-	assert(bdc != nullptr);
-	assert(device != nullptr);
-	assert(swapchain != nullptr);
+	assert(device != nullptr && swapchain != nullptr && state_tracking != nullptr);
 
 	_device->GetDirect3D(&_d3d);
 	assert(_d3d != nullptr);
@@ -75,25 +72,25 @@ reshade::d3d9::runtime_d3d9::runtime_d3d9(IDirect3DDevice9 *device, IDirect3DSwa
 #if RESHADE_GUI
 	subscribe_to_ui("D3D9", [this]() {
 #if RESHADE_DEPTH
-		draw_depth_debug_menu(*_buffer_detection);
+		draw_depth_debug_menu();
 #endif
 	});
 #endif
 #if RESHADE_DEPTH
 	subscribe_to_load_config([this](const ini_file &config) {
 		config.get("D3D9", "DisableINTZ", _disable_intz);
-		config.get("D3D9", "DepthCopyBeforeClears", _buffer_detection->preserve_depth_buffers);
-		config.get("D3D9", "DepthCopyBeforeClearsIndex", _buffer_detection->depthstencil_clear_index);
-		config.get("D3D9", "UseAspectRatioHeuristics", _filter_aspect_ratio);
+		config.get("D3D9", "DepthCopyBeforeClears", _state_tracking.preserve_depth_buffers);
+		config.get("D3D9", "DepthCopyAtClearIndex", _state_tracking.depthstencil_clear_index);
+		config.get("D3D9", "UseAspectRatioHeuristics", _state_tracking.use_aspect_ratio_heuristics);
 
-		if (_buffer_detection->depthstencil_clear_index == std::numeric_limits<UINT>::max())
-			_buffer_detection->depthstencil_clear_index  = 0;
+		if (_state_tracking.depthstencil_clear_index == std::numeric_limits<UINT>::max())
+			_state_tracking.depthstencil_clear_index  = 0;
 	});
 	subscribe_to_save_config([this](ini_file &config) {
 		config.set("D3D9", "DisableINTZ", _disable_intz);
-		config.set("D3D9", "DepthCopyBeforeClears", _buffer_detection->preserve_depth_buffers);
-		config.set("D3D9", "DepthCopyBeforeClearsIndex", _buffer_detection->depthstencil_clear_index);
-		config.set("D3D9", "UseAspectRatioHeuristics", _filter_aspect_ratio);
+		config.set("D3D9", "DepthCopyBeforeClears", _state_tracking.preserve_depth_buffers);
+		config.set("D3D9", "DepthCopyAtClearIndex", _state_tracking.depthstencil_clear_index);
+		config.set("D3D9", "UseAspectRatioHeuristics", _state_tracking.use_aspect_ratio_heuristics);
 	});
 #endif
 }
@@ -112,8 +109,30 @@ bool reshade::d3d9::runtime_d3d9::on_init(const D3DPRESENT_PARAMETERS &pp)
 	_height = pp.BackBufferHeight;
 	_window_width = window_rect.right;
 	_window_height = window_rect.bottom;
-	_color_bit_depth = pp.BackBufferFormat == D3DFMT_A2B10G10R10 || pp.BackBufferFormat == D3DFMT_A2R10G10B10 ? 10 : 8;
 	_backbuffer_format = pp.BackBufferFormat;
+
+	switch (_backbuffer_format)
+	{
+	default:
+		_color_bit_depth = 0;
+		break;
+	case D3DFMT_R5G6B5:
+	case D3DFMT_X1R5G5B5:
+	case D3DFMT_A1R5G5B5:
+		_color_bit_depth = 5;
+		break;
+	case D3DFMT_A8R8G8B8:
+	case D3DFMT_X8R8G8B8:
+	case D3DFMT_A8B8G8R8:
+	case D3DFMT_X8B8G8R8:
+		_color_bit_depth = 8;
+		break;
+	case D3DFMT_A2B10G10R10:
+	case D3DFMT_A2R10G10B10:
+	case D3DFMT_A2B10G10R10_XR_BIAS:
+		_color_bit_depth = 10;
+		break;
+	}
 
 	// Get back buffer surface
 	HRESULT hr = _swapchain->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &_backbuffer);
@@ -208,16 +227,15 @@ void reshade::d3d9::runtime_d3d9::on_present()
 	if (!_is_initialized || FAILED(_device->BeginScene()))
 		return;
 
-	assert(_buffer_detection != nullptr);
-	_vertices = _buffer_detection->total_vertices();
-	_drawcalls = _buffer_detection->total_drawcalls();
+	_vertices = _state_tracking.total_vertices();
+	_drawcalls = _state_tracking.total_drawcalls();
 
 #if RESHADE_DEPTH
 	// Disable INTZ replacement while high network activity is detected, since the option is not available in the UI then, but artifacts may occur without it
-	_buffer_detection->disable_intz = _disable_intz || _has_high_network_activity;
+	_state_tracking.disable_intz = _disable_intz || _has_high_network_activity;
 
 	update_depth_texture_bindings(_has_high_network_activity ? nullptr :
-		_buffer_detection->find_best_depth_surface(_filter_aspect_ratio ? _width : 0, _height, _depth_surface_override));
+		_state_tracking.find_best_depth_surface(_width, _height, _depth_surface_override));
 #endif
 
 	_app_state.capture();
@@ -246,7 +264,7 @@ void reshade::d3d9::runtime_d3d9::on_present()
 	// Can only reset the tracker after the state block has been applied, to ensure current depth-stencil binding is updated correctly
 	if (_reset_buffer_detection)
 	{
-		_buffer_detection->reset(true);
+		_state_tracking.reset(true);
 		_reset_buffer_detection = false;
 	}
 #endif
@@ -256,6 +274,12 @@ void reshade::d3d9::runtime_d3d9::on_present()
 
 bool reshade::d3d9::runtime_d3d9::capture_screenshot(uint8_t *buffer) const
 {
+	if (_color_bit_depth != 8 && _color_bit_depth != 10)
+	{
+		LOG(ERROR) << "Screenshots are not supported for back buffer format " << _backbuffer_format << '!';
+		return false;
+	}
+
 	// Create a surface in system memory, copy back buffer data into it and lock it for reading
 	com_ptr<IDirect3DSurface9> intermediate;
 	if (HRESULT hr = _device->CreateOffscreenPlainSurface(_width, _height, _backbuffer_format, D3DPOOL_SYSTEMMEM, &intermediate, nullptr); FAILED(hr))
@@ -317,7 +341,7 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 
 	if (_d3d_compiler == nullptr)
 	{
-		LOG(ERROR) << "Unable to load HLSL compiler (\"d3dcompiler_47.dll\")." << " Make sure you have the DirectX end-user runtime (June 2010) installed or a newer version of the library in the application directory.";
+		LOG(ERROR) << "Unable to load HLSL compiler (\"d3dcompiler_47.dll\")!" << " Make sure you have the DirectX end-user runtime (June 2010) installed or a newer version of the library in the application directory.";
 		return false;
 	}
 
@@ -341,20 +365,19 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 	// Compile the generated HLSL source code to DX byte code
 	for (const reshadefx::entry_point &entry_point : effect.module.entry_points)
 	{
-		size_t hlsl_size = 0;
-		const char *profile = nullptr, *hlsl = nullptr;
+		HRESULT hr = E_FAIL;
+
+		std::string_view profile, hlsl;
 		com_ptr<ID3DBlob> compiled, d3d_errors;
 
 		switch (entry_point.type)
 		{
 		case reshadefx::shader_type::vs:
-			hlsl = hlsl_vs.c_str();
-			hlsl_size = hlsl_vs.size();
+			hlsl = hlsl_vs;
 			profile = "vs_3_0";
 			break;
 		case reshadefx::shader_type::ps:
-			hlsl = hlsl_ps.c_str();
-			hlsl_size = hlsl_ps.size();
+			hlsl = hlsl_ps;
 			profile = "ps_3_0";
 			break;
 		case reshadefx::shader_type::cs:
@@ -364,32 +387,47 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 			return false;
 		}
 
-		HRESULT hr = D3DCompile(
-			hlsl, hlsl_size,
-			nullptr, nullptr, nullptr,
-			entry_point.name.c_str(),
-			profile,
-			_performance_mode ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_OPTIMIZATION_LEVEL1, 0,
-			&compiled, &d3d_errors);
+		std::string attributes;
+		attributes += "entrypoint=" + entry_point.name + ';';
+		attributes += "profile=" + std::string(profile) + ';';
+		attributes += "flags=" + std::to_string(_performance_mode ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_OPTIMIZATION_LEVEL1) + ';';
 
-		if (d3d_errors != nullptr) // Append warnings to the output error string as well
-			effect.errors.append(static_cast<const char *>(d3d_errors->GetBufferPointer()), d3d_errors->GetBufferSize() - 1); // Subtracting one to not append the null-terminator as well
+		const size_t hash = std::hash<std::string_view>()(attributes) ^ std::hash<std::string_view>()(hlsl);
+		std::vector<char> cso;
+		if (!load_effect_cache(effect.source_file, entry_point.name, hash, cso, effect.assembly[entry_point.name]))
+		{
+			hr = D3DCompile(
+				hlsl.data(), hlsl.size(),
+				nullptr, nullptr, nullptr,
+				entry_point.name.c_str(),
+				profile.data(),
+				_performance_mode ? D3DCOMPILE_OPTIMIZATION_LEVEL3 : D3DCOMPILE_OPTIMIZATION_LEVEL1, 0,
+				&compiled, &d3d_errors);
 
-		// No need to setup resources if any of the shaders failed to compile
-		if (FAILED(hr))
-			return false;
+			if (d3d_errors != nullptr) // Append warnings to the output error string as well
+				effect.errors.append(static_cast<const char *>(d3d_errors->GetBufferPointer()), d3d_errors->GetBufferSize() - 1); // Subtracting one to not append the null-terminator as well
 
-		if (com_ptr<ID3DBlob> d3d_disassembled; SUCCEEDED(D3DDisassemble(compiled->GetBufferPointer(), compiled->GetBufferSize(), 0, nullptr, &d3d_disassembled)))
-			effect.assembly[entry_point.name] = std::string(static_cast<const char *>(d3d_disassembled->GetBufferPointer()));
+			// No need to setup resources if any of the shaders failed to compile
+			if (FAILED(hr))
+				return false;
+
+			cso.resize(compiled->GetBufferSize());
+			std::memcpy(cso.data(), compiled->GetBufferPointer(), cso.size());
+
+			if (com_ptr<ID3DBlob> disassembled; SUCCEEDED(D3DDisassemble(cso.data(), cso.size(), 0, nullptr, &disassembled)))
+				effect.assembly[entry_point.name].assign(static_cast<const char *>(disassembled->GetBufferPointer()), disassembled->GetBufferSize() - 1);
+
+			save_effect_cache(effect.source_file, entry_point.name, hash, cso, effect.assembly[entry_point.name]);
+		}
 
 		// Create runtime shader objects from the compiled DX byte code
 		switch (entry_point.type)
 		{
 		case reshadefx::shader_type::vs:
-			hr = _device->CreateVertexShader(static_cast<const DWORD *>(compiled->GetBufferPointer()), reinterpret_cast<IDirect3DVertexShader9 **>(&entry_points[entry_point.name]));
+			hr = _device->CreateVertexShader(reinterpret_cast<const DWORD *>(cso.data()), reinterpret_cast<IDirect3DVertexShader9 **>(&entry_points[entry_point.name]));
 			break;
 		case reshadefx::shader_type::ps:
-			hr = _device->CreatePixelShader(static_cast<const DWORD *>(compiled->GetBufferPointer()), reinterpret_cast<IDirect3DPixelShader9 **>(&entry_points[entry_point.name]));
+			hr = _device->CreatePixelShader(reinterpret_cast<const DWORD *>(cso.data()), reinterpret_cast<IDirect3DPixelShader9 **>(&entry_points[entry_point.name]));
 			break;
 		}
 
@@ -400,7 +438,7 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 		}
 	}
 
-	d3d9_technique_data technique_init;
+	technique_data technique_init;
 	assert(effect.module.num_texture_bindings == 0);
 	assert(effect.module.num_storage_bindings == 0);
 	technique_init.num_samplers = effect.module.num_sampler_bindings;
@@ -416,7 +454,7 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 
 		const texture &texture = look_up_texture_by_name(info.texture_name);
 
-		technique_init.sampler_textures[info.binding] = static_cast<d3d9_tex_data *>(texture.impl)->texture.get();
+		technique_init.sampler_textures[info.binding] = static_cast<tex_data *>(texture.impl)->texture.get();
 
 		// Since textures with auto-generated mipmap levels do not have a mipmap maximum, limit the bias here so this is not as obvious
 		assert(texture.levels > 0);
@@ -443,13 +481,13 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 			continue;
 
 		// Copy construct new technique implementation instead of move because effect may contain multiple techniques
-		auto impl = new d3d9_technique_data(technique_init);
+		auto impl = new technique_data(technique_init);
 		technique.impl = impl;
 
 		impl->passes.resize(technique.passes.size());
 		for (size_t pass_index = 0; pass_index < technique.passes.size(); ++pass_index)
 		{
-			d3d9_pass_data &pass_data = impl->passes[pass_index];
+			pass_data &pass_data = impl->passes[pass_index];
 			const reshadefx::pass_info &pass_info = technique.passes[pass_index];
 
 			max_vertices = std::max(max_vertices, pass_info.num_vertices);
@@ -470,7 +508,7 @@ bool reshade::d3d9::runtime_d3d9::init_effect(size_t index)
 					break;
 				}
 
-				d3d9_tex_data *const tex_impl = static_cast<d3d9_tex_data *>(
+				tex_data *const tex_impl = static_cast<tex_data *>(
 					look_up_texture_by_name(pass_info.render_target_names[k]).impl);
 
 				// Unset textures that are used as render target
@@ -667,7 +705,7 @@ void reshade::d3d9::runtime_d3d9::unload_effect(size_t index)
 		if (tech.effect_index != index)
 			continue;
 
-		delete static_cast<d3d9_technique_data *>(tech.impl);
+		delete static_cast<technique_data *>(tech.impl);
 		tech.impl = nullptr;
 	}
 
@@ -677,7 +715,7 @@ void reshade::d3d9::runtime_d3d9::unload_effects()
 {
 	for (technique &tech : _techniques)
 	{
-		delete static_cast<d3d9_technique_data *>(tech.impl);
+		delete static_cast<technique_data *>(tech.impl);
 		tech.impl = nullptr;
 	}
 
@@ -686,16 +724,17 @@ void reshade::d3d9::runtime_d3d9::unload_effects()
 
 bool reshade::d3d9::runtime_d3d9::init_texture(texture &texture)
 {
-	auto impl = new d3d9_tex_data();
+	auto impl = new tex_data();
 	texture.impl = impl;
 
-	switch (texture.impl_reference)
+	if (texture.semantic == "COLOR")
 	{
-	case texture_reference::back_buffer:
 		impl->texture = _backbuffer_texture;
 		impl->surface = _backbuffer_texture_surface;
 		return true;
-	case texture_reference::depth_buffer:
+	}
+	if (texture.semantic == "DEPTH")
+	{
 #if RESHADE_DEPTH
 		impl->texture = _depth_texture;
 		impl->surface = _depth_surface;
@@ -795,8 +834,8 @@ bool reshade::d3d9::runtime_d3d9::init_texture(texture &texture)
 }
 void reshade::d3d9::runtime_d3d9::upload_texture(const texture &texture, const uint8_t *pixels)
 {
-	auto impl = static_cast<d3d9_tex_data *>(texture.impl);
-	assert(impl != nullptr && texture.impl_reference == texture_reference::none && pixels != nullptr);
+	auto impl = static_cast<tex_data *>(texture.impl);
+	assert(impl != nullptr && texture.semantic.empty() && pixels != nullptr);
 
 	D3DSURFACE_DESC desc; impl->texture->GetLevelDesc(0, &desc); // Get D3D texture format
 	com_ptr<IDirect3DTexture9> intermediate;
@@ -853,13 +892,13 @@ void reshade::d3d9::runtime_d3d9::upload_texture(const texture &texture, const u
 }
 void reshade::d3d9::runtime_d3d9::destroy_texture(texture &texture)
 {
-	delete static_cast<d3d9_tex_data *>(texture.impl);
+	delete static_cast<tex_data *>(texture.impl);
 	texture.impl = nullptr;
 }
 
 void reshade::d3d9::runtime_d3d9::render_technique(technique &technique)
 {
-	const auto impl = static_cast<d3d9_technique_data *>(technique.impl);
+	const auto impl = static_cast<technique_data *>(technique.impl);
 
 	// Setup vertex input (used to have a vertex ID as vertex shader input)
 	_device->SetStreamSource(0, _effect_vertex_buffer.get(), 0, sizeof(float));
@@ -884,7 +923,7 @@ void reshade::d3d9::runtime_d3d9::render_technique(technique &technique)
 			_device->StretchRect(_backbuffer_resolved.get(), nullptr, _backbuffer_texture_surface.get(), nullptr, D3DTEXF_NONE);
 		}
 
-		const d3d9_pass_data &pass_data = impl->passes[pass_index];
+		const pass_data &pass_data = impl->passes[pass_index];
 		const reshadefx::pass_info &pass_info = technique.passes[pass_index];
 
 		// Setup state
@@ -1160,7 +1199,7 @@ void reshade::d3d9::runtime_d3d9::render_imgui_draw_data(ImDrawData *draw_data)
 			};
 			_device->SetScissorRect(&scissor_rect);
 
-			_device->SetTexture(0, static_cast<const d3d9_tex_data *>(cmd.TextureId)->texture.get());
+			_device->SetTexture(0, static_cast<const tex_data *>(cmd.TextureId)->texture.get());
 
 			_device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, cmd.VtxOffset + vtx_offset, 0, draw_list->VtxBuffer.Size, cmd.IdxOffset + idx_offset, cmd.ElemCount / 3);
 
@@ -1173,7 +1212,7 @@ void reshade::d3d9::runtime_d3d9::render_imgui_draw_data(ImDrawData *draw_data)
 #endif
 
 #if RESHADE_DEPTH
-void reshade::d3d9::runtime_d3d9::draw_depth_debug_menu(buffer_detection &tracker)
+void reshade::d3d9::runtime_d3d9::draw_depth_debug_menu()
 {
 	if (!ImGui::CollapsingHeader("Depth Buffers", ImGuiTreeNodeFlags_DefaultOpen))
 		return;
@@ -1189,23 +1228,23 @@ void reshade::d3d9::runtime_d3d9::draw_depth_debug_menu(buffer_detection &tracke
 	// Do NOT reset tracker within state block capture scope, since the state block may otherwise bind the replacement depth-stencil after it has been destroyed during that reset
 	_reset_buffer_detection |= ImGui::Checkbox("Disable replacement with INTZ format", &_disable_intz);
 
-	_reset_buffer_detection |= ImGui::Checkbox("Use aspect ratio heuristics", &_filter_aspect_ratio);
-	_reset_buffer_detection |= ImGui::Checkbox("Copy depth buffer before clear operations", &tracker.preserve_depth_buffers);
+	_reset_buffer_detection |= ImGui::Checkbox("Use aspect ratio heuristics", &_state_tracking.use_aspect_ratio_heuristics);
+	_reset_buffer_detection |= ImGui::Checkbox("Copy depth buffer before clear operations", &_state_tracking.preserve_depth_buffers);
 
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
 
 	// Sort pointer list so that added/removed items do not change the UI much
-	std::vector<std::pair<IDirect3DSurface9 *, buffer_detection::depthstencil_info>> sorted_buffers;
-	sorted_buffers.reserve(tracker.depth_buffer_counters().size());
-	for (const auto &[ds_surface, snapshot] : tracker.depth_buffer_counters())
+	std::vector<std::pair<IDirect3DSurface9 *, state_tracking::depthstencil_info>> sorted_buffers;
+	sorted_buffers.reserve(_state_tracking.depth_buffer_counters().size());
+	for (const auto &[ds_surface, snapshot] : _state_tracking.depth_buffer_counters())
 		sorted_buffers.push_back({ ds_surface.get(), snapshot });
 	std::sort(sorted_buffers.begin(), sorted_buffers.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
 	for (const auto &[ds_surface, snapshot] : sorted_buffers)
 	{
 		char label[512] = "";
-		sprintf_s(label, "%s0x%p", (ds_surface == tracker.current_depth_surface() || ds_surface == _depth_surface ? "> " : "  "), ds_surface);
+		sprintf_s(label, "%s0x%p", (ds_surface == _state_tracking.current_depth_surface() || ds_surface == _depth_surface ? "> " : "  "), ds_surface);
 
 		D3DSURFACE_DESC desc;
 		ds_surface->GetDesc(&desc);
@@ -1228,16 +1267,16 @@ void reshade::d3d9::runtime_d3d9::draw_depth_debug_menu(buffer_detection &tracke
 		ImGui::Text("| %4ux%-4u | %5u draw calls ==> %8u vertices |%s",
 			desc.Width, desc.Height, snapshot.total_stats.drawcalls, snapshot.total_stats.vertices, (msaa ? " MSAA" : ""));
 
-		if (tracker.preserve_depth_buffers && ds_surface == tracker.current_depth_surface())
+		if (_state_tracking.preserve_depth_buffers && ds_surface == _state_tracking.current_depth_surface())
 		{
 			for (UINT clear_index = 1; clear_index <= snapshot.clears.size(); ++clear_index)
 			{
-				sprintf_s(label, "%s  CLEAR %2u", (clear_index == tracker.depthstencil_clear_index ? "> " : "  "), clear_index);
+				sprintf_s(label, "%s  CLEAR %2u", (clear_index == _state_tracking.depthstencil_clear_index ? "> " : "  "), clear_index);
 
-				if (bool value = (tracker.depthstencil_clear_index == clear_index);
+				if (bool value = (_state_tracking.depthstencil_clear_index == clear_index);
 					ImGui::Checkbox(label, &value))
 				{
-					tracker.depthstencil_clear_index = value ? clear_index : 0;
+					_state_tracking.depthstencil_clear_index = value ? clear_index : 0;
 					_reset_buffer_detection = true;
 				}
 
@@ -1290,19 +1329,18 @@ void reshade::d3d9::runtime_d3d9::update_depth_texture_bindings(com_ptr<IDirect3
 	// Update all references to the new texture
 	for (const texture &tex : _textures)
 	{
-		if (tex.impl == nullptr ||
-			tex.impl_reference != texture_reference::depth_buffer)
+		if (tex.impl == nullptr || tex.semantic != "DEPTH")
 			continue;
-		const auto tex_impl = static_cast<d3d9_tex_data *>(tex.impl);
+		const auto tex_impl = static_cast<tex_data *>(tex.impl);
 
 		// Update references in technique list
 		for (const technique &tech : _techniques)
 		{
-			const auto tech_impl = static_cast<d3d9_technique_data *>(tech.impl);
+			const auto tech_impl = static_cast<technique_data *>(tech.impl);
 			if (tech_impl == nullptr)
 				continue;
 
-			for (d3d9_pass_data &pass_data : tech_impl->passes)
+			for (pass_data &pass_data : tech_impl->passes)
 				// Replace all occurances of the old texture with the new one
 				for (IDirect3DTexture9 *&sampler_tex : pass_data.sampler_textures)
 					if (tex_impl->texture == sampler_tex)

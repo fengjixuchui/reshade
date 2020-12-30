@@ -6,6 +6,7 @@
 #include "dll_log.hpp"
 #include "hook_manager.hpp"
 #include "dxgi/dxgi_device.hpp"
+#include "com_ptr.hpp"
 #include <d2d1_3.h>
 
 #define ID2D1Factory_CreateDevice_Impl(vtable_offset, factory_interface_version, device_interface_version) \
@@ -21,7 +22,7 @@
 			dxgiDevice = device_proxy->_orig; \
 		const HRESULT hr = reshade::hooks::call(ID2D1Factory##factory_interface_version##_CreateDevice, vtable_from_instance(factory) + vtable_offset)(factory, dxgiDevice, d2dDevice); \
 		if (FAILED(hr)) \
-			LOG(WARN) << "ID2D1Factory" #factory_interface_version "::CreateDevice" << " failed with error code " << hr << '!'; \
+			LOG(WARN) << "ID2D1Factory" #factory_interface_version "::CreateDevice" << " failed with error code " << hr << '.'; \
 		return hr; \
 	}
 
@@ -52,7 +53,7 @@ HOOK_EXPORT HRESULT WINAPI D2D1CreateDevice(IDXGIDevice *dxgiDevice, CONST D2D1_
 	const HRESULT hr = reshade::hooks::call<D2D1CreateDevice_t>(D2D1CreateDevice)(dxgiDevice, creationProperties, d2dDevice);
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "D2D1CreateDevice" << " failed with error code " << hr << '!';
+		LOG(WARN) << "D2D1CreateDevice" << " failed with error code " << hr << '.';
 	}
 
 	return hr;
@@ -73,7 +74,7 @@ HOOK_EXPORT HRESULT WINAPI D2D1CreateFactory(D2D1_FACTORY_TYPE factoryType, REFI
 	const HRESULT hr = reshade::hooks::call<D2D1CreateFactory_t>(D2D1CreateFactory)(factoryType, riid, pFactoryOptions, ppIFactory);
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "D2D1CreateFactory" << " failed with error code " << hr << '!';
+		LOG(WARN) << "D2D1CreateFactory" << " failed with error code " << hr << '.';
 		return hr;
 	}
 

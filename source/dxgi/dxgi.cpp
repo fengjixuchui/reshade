@@ -15,12 +15,20 @@
 #include "d3d12/d3d12_device.hpp"
 #include "d3d12/d3d12_command_queue.hpp"
 #include "d3d12/runtime_d3d12.hpp"
+#include "format_utils.hpp"
 #include "runtime_config.hpp"
 #include <CoreWindow.h>
 
 // Use this to filter out internal device created by the DXGI runtime in the D3D device creation hooks 
 extern thread_local bool g_in_dxgi_runtime;
 
+static void dump_format(DXGI_FORMAT format)
+{
+	if (const char *format_string = format_to_string(format); format_string != nullptr)
+		LOG(INFO) << "  | Format                                  | " << std::setw(39) << format_string << " |";
+	else
+		LOG(INFO) << "  | Format                                  | " << std::setw(39) << format << " |";
+}
 static void dump_sample_desc(const DXGI_SAMPLE_DESC &desc)
 {
 	LOG(INFO) <<     "  | SampleCount                             | " << std::setw(39) << desc.Count   << " |";
@@ -47,11 +55,11 @@ static void dump_and_modify_swapchain_desc(DXGI_SWAP_CHAIN_DESC &desc)
 	LOG(INFO) << "  | Width                                   | " << std::setw(39) << desc.BufferDesc.Width   << " |";
 	LOG(INFO) << "  | Height                                  | " << std::setw(39) << desc.BufferDesc.Height  << " |";
 	LOG(INFO) << "  | RefreshRate                             | " << std::setw(19) << desc.BufferDesc.RefreshRate.Numerator << ' ' << std::setw(19) << desc.BufferDesc.RefreshRate.Denominator << " |";
-	LOG(INFO) << "  | Format                                  | " << std::setw(39) << desc.BufferDesc.Format  << " |";
+	dump_format(desc.BufferDesc.Format);
 	LOG(INFO) << "  | ScanlineOrdering                        | " << std::setw(39) << desc.BufferDesc.ScanlineOrdering   << " |";
 	LOG(INFO) << "  | Scaling                                 | " << std::setw(39) << desc.BufferDesc.Scaling << " |";
 	dump_sample_desc(desc.SampleDesc);
-	LOG(INFO) << "  | BufferUsage                             | " << std::setw(39) << desc.BufferUsage  << " |";
+	LOG(INFO) << "  | BufferUsage                             | " << std::setw(39) << std::hex << desc.BufferUsage << std::dec << " |";
 	LOG(INFO) << "  | BufferCount                             | " << std::setw(39) << desc.BufferCount  << " |";
 	LOG(INFO) << "  | OutputWindow                            | " << std::setw(39) << desc.OutputWindow << " |";
 	LOG(INFO) << "  | Windowed                                | " << std::setw(39) << (desc.Windowed ? "TRUE" : "FALSE") << " |";
@@ -59,32 +67,26 @@ static void dump_and_modify_swapchain_desc(DXGI_SWAP_CHAIN_DESC &desc)
 	LOG(INFO) << "  | Flags                                   | " << std::setw(39) << std::hex << desc.Flags << std::dec << " |";
 	LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 
-	{ const reshade::ini_file config(g_reshade_base_path / L"ReShade.ini");
+	if (reshade::global_config().get("APP", "ForceWindowed"))
+	{
+		desc.Windowed = TRUE;
+	}
+	if (reshade::global_config().get("APP", "ForceFullscreen"))
+	{
+		desc.Windowed = FALSE;
+	}
 
-		if (bool force_windowed;
-			config.get("D3D9", "ForceWindowed", force_windowed) && force_windowed)
-		{
-			desc.Windowed = TRUE;
-		}
+	if (unsigned int force_resolution[2] = {};
+		reshade::global_config().get("APP", "ForceResolution", force_resolution) &&
+		force_resolution[0] != 0 && force_resolution[1] != 0)
+	{
+		desc.BufferDesc.Width = force_resolution[0];
+		desc.BufferDesc.Height = force_resolution[1];
+	}
 
-		if (bool force_fullscreen;
-			config.get("D3D9", "ForceFullscreen", force_fullscreen) && force_fullscreen)
-		{
-			desc.Windowed = FALSE;
-		}
-
-		if (unsigned int force_resolution[2];
-			config.get("D3D9", "ForceResolution", force_resolution) && force_resolution[0] != 0 && force_resolution[1] != 0)
-		{
-			desc.BufferDesc.Width = force_resolution[0];
-			desc.BufferDesc.Height = force_resolution[1];
-		}
-
-		if (bool force_10_bit_format;
-			config.get("D3D9", "Force10BitFormat", force_10_bit_format) && force_10_bit_format)
-		{
-			desc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-		}
+	if (reshade::global_config().get("APP", "Force10BitFormat"))
+	{
+		desc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
 	}
 }
 static void dump_and_modify_swapchain_desc(DXGI_SWAP_CHAIN_DESC1 &desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC &fullscreen_desc)
@@ -96,12 +98,12 @@ static void dump_and_modify_swapchain_desc(DXGI_SWAP_CHAIN_DESC1 &desc, DXGI_SWA
 	LOG(INFO) << "  | Width                                   | " << std::setw(39) << desc.Width   << " |";
 	LOG(INFO) << "  | Height                                  | " << std::setw(39) << desc.Height  << " |";
 	LOG(INFO) << "  | RefreshRate                             | " << std::setw(19) << fullscreen_desc.RefreshRate.Numerator << ' ' << std::setw(19) << fullscreen_desc.RefreshRate.Denominator << " |";
-	LOG(INFO) << "  | Format                                  | " << std::setw(39) << desc.Format  << " |";
+	dump_format(desc.Format);
 	LOG(INFO) << "  | Stereo                                  | " << std::setw(39) << (desc.Stereo ? "TRUE" : "FALSE") << " |";
 	LOG(INFO) << "  | ScanlineOrdering                        | " << std::setw(39) << fullscreen_desc.ScanlineOrdering << " |";
 	LOG(INFO) << "  | Scaling                                 | " << std::setw(39) << fullscreen_desc.Scaling << " |";
 	dump_sample_desc(desc.SampleDesc);
-	LOG(INFO) << "  | BufferUsage                             | " << std::setw(39) << desc.BufferUsage << " |";
+	LOG(INFO) << "  | BufferUsage                             | " << std::setw(39) << std::hex << desc.BufferUsage << std::dec << " |";
 	LOG(INFO) << "  | BufferCount                             | " << std::setw(39) << desc.BufferCount << " |";
 	LOG(INFO) << "  | Windowed                                | " << std::setw(39) << (fullscreen_desc.Windowed ? "TRUE" : "FALSE") << " |";
 	LOG(INFO) << "  | SwapEffect                              | " << std::setw(39) << desc.SwapEffect  << " |";
@@ -109,32 +111,26 @@ static void dump_and_modify_swapchain_desc(DXGI_SWAP_CHAIN_DESC1 &desc, DXGI_SWA
 	LOG(INFO) << "  | Flags                                   | " << std::setw(39) << std::hex << desc.Flags << std::dec << " |";
 	LOG(INFO) << "  +-----------------------------------------+-----------------------------------------+";
 
-	{ const reshade::ini_file config(g_reshade_base_path / L"ReShade.ini");
+	if (reshade::global_config().get("APP", "ForceWindowed"))
+	{
+		fullscreen_desc.Windowed = TRUE;
+	}
+	if (reshade::global_config().get("APP", "ForceFullscreen"))
+	{
+		fullscreen_desc.Windowed = FALSE;
+	}
 
-		if (bool force_windowed;
-			config.get("DXGI", "ForceWindowed", force_windowed) && force_windowed)
-		{
-			fullscreen_desc.Windowed = TRUE;
-		}
+	if (unsigned int force_resolution[2] = {};
+		reshade::global_config().get("APP", "ForceResolution", force_resolution) &&
+		force_resolution[0] != 0 && force_resolution[1] != 0)
+	{
+		desc.Width = force_resolution[0];
+		desc.Height = force_resolution[1];
+	}
 
-		if (bool force_fullscreen;
-			config.get("DXGI", "ForceFullscreen", force_fullscreen) && force_fullscreen)
-		{
-			fullscreen_desc.Windowed = FALSE;
-		}
-
-		if (unsigned int force_resolution[2];
-			config.get("DXGI", "ForceResolution", force_resolution) && force_resolution[0] != 0 && force_resolution[1] != 0)
-		{
-			desc.Width = force_resolution[0];
-			desc.Height = force_resolution[1];
-		}
-
-		if (bool force_10_bit_format;
-			config.get("DXGI", "Force10BitFormat", force_10_bit_format) && force_10_bit_format)
-		{
-			desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-		}
+	if (reshade::global_config().get("APP", "Force10BitFormat"))
+	{
+		desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
 	}
 }
 
@@ -142,7 +138,7 @@ UINT query_device(IUnknown *&device, com_ptr<IUnknown> &device_proxy)
 {
 	if (com_ptr<D3D10Device> device_d3d10; SUCCEEDED(device->QueryInterface(&device_d3d10)))
 	{
-		device = device_d3d10->_orig; // Set device pointer back to original object so that the swapchain creation functions work as expected
+		device = device_d3d10->_orig; // Set device pointer back to original object so that the swap chain creation functions work as expected
 		device_proxy = std::move(reinterpret_cast<com_ptr<IUnknown> &>(device_d3d10));
 		return 10;
 	}
@@ -180,19 +176,19 @@ static void init_reshade_runtime_d3d(T *&swapchain, UINT direct3d_version, const
 	{
 		const com_ptr<D3D10Device> &device = reinterpret_cast<const com_ptr<D3D10Device> &>(device_proxy);
 
-		auto runtime = std::make_unique<reshade::d3d10::runtime_d3d10>(device->_orig, swapchain, &device->_buffer_detection);
+		auto runtime = std::make_unique<reshade::d3d10::runtime_d3d10>(device->_orig, swapchain, &device->_state);
 		if (!runtime->on_init(desc))
-			LOG(ERROR) << "Failed to initialize Direct3D 10 runtime environment on runtime " << runtime.get() << '.';
+			LOG(ERROR) << "Failed to initialize Direct3D 10 runtime environment on runtime " << runtime.get() << '!';
 
-		swapchain_proxy = new DXGISwapChain(device.get(), swapchain, std::move(runtime)); // Overwrite returned swapchain pointer with hooked object
+		swapchain_proxy = new DXGISwapChain(device.get(), swapchain, std::move(runtime)); // Overwrite returned swap chain pointer with hooked object
 	}
 	else if (direct3d_version == 11)
 	{
 		const com_ptr<D3D11Device> &device = reinterpret_cast<const com_ptr<D3D11Device> &>(device_proxy);
 
-		auto runtime = std::make_unique<reshade::d3d11::runtime_d3d11>(device->_orig, swapchain, &device->_immediate_context->_buffer_detection);
+		auto runtime = std::make_unique<reshade::d3d11::runtime_d3d11>(device->_orig, swapchain, &device->_immediate_context->_state);
 		if (!runtime->on_init(desc))
-			LOG(ERROR) << "Failed to initialize Direct3D 11 runtime environment on runtime " << runtime.get() << '.';
+			LOG(ERROR) << "Failed to initialize Direct3D 11 runtime environment on runtime " << runtime.get() << '!';
 
 		swapchain_proxy = new DXGISwapChain(device.get(), swapchain, std::move(runtime));
 	}
@@ -202,15 +198,15 @@ static void init_reshade_runtime_d3d(T *&swapchain, UINT direct3d_version, const
 		{
 			const com_ptr<D3D12CommandQueue> &command_queue = reinterpret_cast<const com_ptr<D3D12CommandQueue> &>(device_proxy);
 
-			// Update window handle in swapchain description for UWP applications
+			// Update window handle in swap chain description for UWP applications
 			if (hwnd != nullptr)
 				desc.OutputWindow = hwnd;
 
-			auto runtime = std::make_unique<reshade::d3d12::runtime_d3d12>(command_queue->_device->_orig, command_queue->_orig, swapchain3.get(), &command_queue->_device->_buffer_detection);
+			auto runtime = std::make_unique<reshade::d3d12::runtime_d3d12>(command_queue->_device->_orig, command_queue->_orig, swapchain3.get(), &command_queue->_device->_state);
 			if (!runtime->on_init(desc))
-				LOG(ERROR) << "Failed to initialize Direct3D 12 runtime environment on runtime " << runtime.get() << '.';
+				LOG(ERROR) << "Failed to initialize Direct3D 12 runtime environment on runtime " << runtime.get() << '!';
 
-			swapchain_proxy = new DXGISwapChain(command_queue->_device, swapchain3.get(), std::move(runtime));
+			swapchain_proxy = new DXGISwapChain(command_queue.get(), swapchain3.get(), std::move(runtime));
 		}
 		else
 		{
@@ -224,12 +220,9 @@ static void init_reshade_runtime_d3d(T *&swapchain, UINT direct3d_version, const
 
 	if (swapchain_proxy != nullptr)
 	{
-		{ const reshade::ini_file config(g_reshade_base_path / L"ReShade.ini");
-
-			config.get("DXGI", "ForceVSync", swapchain_proxy->_force_vsync);
-			config.get("DXGI", "ForceResolution", swapchain_proxy->_force_resolution);
-			config.get("DXGI", "Force10BitFormat", swapchain_proxy->_force_10_bit_format);
-		}
+		reshade::global_config().get("APP", "ForceVSync", swapchain_proxy->_force_vsync);
+		reshade::global_config().get("APP", "ForceResolution", swapchain_proxy->_force_resolution);
+		reshade::global_config().get("APP", "Force10BitFormat", swapchain_proxy->_force_10_bit_format);
 
 #if RESHADE_VERBOSE_LOG
 		LOG(INFO) << "Returning IDXGISwapChain" << swapchain_proxy->_interface_version << " object " << swapchain_proxy << '.';
@@ -261,7 +254,7 @@ HRESULT STDMETHODCALLTYPE IDXGIFactory_CreateSwapChain(IDXGIFactory *pFactory, I
 	g_in_dxgi_runtime = false;
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "IDXGIFactory::CreateSwapChain" << " failed with error code " << hr << '!';
+		LOG(WARN) << "IDXGIFactory::CreateSwapChain" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -301,7 +294,7 @@ HRESULT STDMETHODCALLTYPE IDXGIFactory2_CreateSwapChainForHwnd(IDXGIFactory2 *pF
 	g_in_dxgi_runtime = false;
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "IDXGIFactory2::CreateSwapChainForHwnd" << " failed with error code " << hr << '!';
+		LOG(WARN) << "IDXGIFactory2::CreateSwapChainForHwnd" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -335,7 +328,7 @@ HRESULT STDMETHODCALLTYPE IDXGIFactory2_CreateSwapChainForCoreWindow(IDXGIFactor
 	g_in_dxgi_runtime = false;
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "IDXGIFactory2::CreateSwapChainForCoreWindow" << " failed with error code " << hr << '!';
+		LOG(WARN) << "IDXGIFactory2::CreateSwapChainForCoreWindow" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -373,7 +366,7 @@ HRESULT STDMETHODCALLTYPE IDXGIFactory2_CreateSwapChainForComposition(IDXGIFacto
 	g_in_dxgi_runtime = false;
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "IDXGIFactory2::CreateSwapChainForComposition" << " failed with error code " << hr << '!';
+		LOG(WARN) << "IDXGIFactory2::CreateSwapChainForComposition" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -397,7 +390,7 @@ HOOK_EXPORT HRESULT WINAPI CreateDXGIFactory1(REFIID riid, void **ppFactory)
 	const HRESULT hr = reshade::hooks::call(CreateDXGIFactory1)(riid, ppFactory);
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "CreateDXGIFactory1" << " failed with error code " << hr << '!';
+		LOG(WARN) << "CreateDXGIFactory1" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -442,7 +435,7 @@ HOOK_EXPORT HRESULT WINAPI CreateDXGIFactory2(UINT Flags, REFIID riid, void **pp
 	const HRESULT hr = trampoline(Flags, riid, ppFactory);
 	if (FAILED(hr))
 	{
-		LOG(WARN) << "CreateDXGIFactory2" << " failed with error code " << hr << '!';
+		LOG(WARN) << "CreateDXGIFactory2" << " failed with error code " << hr << '.';
 		return hr;
 	}
 
@@ -472,4 +465,15 @@ HOOK_EXPORT HRESULT WINAPI DXGIGetDebugInterface1(UINT Flags, REFIID riid, void 
 		return E_NOINTERFACE;
 
 	return trampoline(Flags, riid, pDebug);
+}
+
+HOOK_EXPORT HRESULT WINAPI DXGIDeclareAdapterRemovalSupport()
+{
+	static const auto trampoline = reshade::hooks::call(DXGIDeclareAdapterRemovalSupport);
+
+	// DXGIDeclareAdapterRemovalSupport is supported on Windows 10 version 1803 and up, silently ignore on older systems
+	if (trampoline == nullptr)
+		return S_OK;
+
+	return trampoline();
 }

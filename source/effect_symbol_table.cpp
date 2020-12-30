@@ -5,6 +5,7 @@
 
 #include "effect_symbol_table.hpp"
 #include <cassert>
+#include <malloc.h> // alloca
 #include <algorithm> // std::upper_bound, std::sort
 
 #pragma region Import intrinsic functions
@@ -39,6 +40,15 @@ enum {
 #define int2 { reshadefx::type::t_int, 2, 1 }
 #define int3 { reshadefx::type::t_int, 3, 1 }
 #define int4 { reshadefx::type::t_int, 4, 1 }
+#define int2x3 { reshadefx::type::t_int, 2, 3 }
+#define int2x2 { reshadefx::type::t_int, 2, 2 }
+#define int2x4 { reshadefx::type::t_int, 2, 4 }
+#define int3x2 { reshadefx::type::t_int, 3, 2 }
+#define int3x3 { reshadefx::type::t_int, 3, 3 }
+#define int3x4 { reshadefx::type::t_int, 3, 4 }
+#define int4x2 { reshadefx::type::t_int, 4, 2 }
+#define int4x3 { reshadefx::type::t_int, 4, 3 }
+#define int4x4 { reshadefx::type::t_int, 4, 4 }
 #define inout_int { reshadefx::type::t_int, 1, 1, reshadefx::type::q_inout | reshadefx::type::q_groupshared }
 #define uint { reshadefx::type::t_uint, 1, 1 }
 #define uint2 { reshadefx::type::t_uint, 2, 1 }
@@ -49,8 +59,14 @@ enum {
 #define float2 { reshadefx::type::t_float, 2, 1 }
 #define float3 { reshadefx::type::t_float, 3, 1 }
 #define float4 { reshadefx::type::t_float, 4, 1 }
+#define float2x3 { reshadefx::type::t_float, 2, 3 }
 #define float2x2 { reshadefx::type::t_float, 2, 2 }
+#define float2x4 { reshadefx::type::t_float, 2, 4 }
+#define float3x2 { reshadefx::type::t_float, 3, 2 }
 #define float3x3 { reshadefx::type::t_float, 3, 3 }
+#define float3x4 { reshadefx::type::t_float, 3, 4 }
+#define float4x2 { reshadefx::type::t_float, 4, 2 }
+#define float4x3 { reshadefx::type::t_float, 4, 3 }
 #define float4x4 { reshadefx::type::t_float, 4, 4 }
 #define out_float { reshadefx::type::t_float, 1, 1, reshadefx::type::q_out }
 #define out_float2 { reshadefx::type::t_float, 2, 1, reshadefx::type::q_out }
@@ -228,12 +244,12 @@ bool reshadefx::symbol_table::insert_symbol(const std::string &name, const symbo
 	return true;
 }
 
-reshadefx::symbol reshadefx::symbol_table::find_symbol(const std::string &name) const
+reshadefx::scoped_symbol reshadefx::symbol_table::find_symbol(const std::string &name) const
 {
 	// Default to start search with current scope and walk back the scope chain
 	return find_symbol(name, _current_scope, false);
 }
-reshadefx::symbol reshadefx::symbol_table::find_symbol(const std::string &name, const scope &scope, bool exclusive) const
+reshadefx::scoped_symbol reshadefx::symbol_table::find_symbol(const std::string &name, const scope &scope, bool exclusive) const
 {
 	const auto stack_it = _symbol_stack.find(name);
 
@@ -242,7 +258,7 @@ reshadefx::symbol reshadefx::symbol_table::find_symbol(const std::string &name, 
 		return {};
 
 	// Walk up the scope chain starting at the requested scope level and find a matching symbol
-	symbol result = {};
+	scoped_symbol result = {};
 
 	for (auto it = stack_it->second.rbegin(), end = stack_it->second.rend(); it != end; ++it)
 	{

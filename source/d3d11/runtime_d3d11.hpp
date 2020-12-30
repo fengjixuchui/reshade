@@ -7,14 +7,14 @@
 
 #include "runtime.hpp"
 #include "state_block.hpp"
-#include "buffer_detection.hpp"
+#include "state_tracking.hpp"
 
 namespace reshade::d3d11
 {
 	class runtime_d3d11 : public runtime
 	{
 	public:
-		runtime_d3d11(ID3D11Device *device, IDXGISwapChain *swapchain, buffer_detection_context *bdc);
+		runtime_d3d11(ID3D11Device *device, IDXGISwapChain *swapchain, state_tracking_context *state_tracking);
 		~runtime_d3d11();
 
 		bool on_init(const DXGI_SWAP_CHAIN_DESC &desc);
@@ -34,11 +34,13 @@ namespace reshade::d3d11
 
 		void render_technique(technique &technique) override;
 
+		void set_debug_name(ID3D11DeviceChild *object, LPCWSTR name) const;
+
 		state_block _app_state;
+		state_tracking_context &_state_tracking;
 		const com_ptr<ID3D11Device> _device;
 		com_ptr<ID3D11DeviceContext> _immediate_context;
 		const com_ptr<IDXGISwapChain> _swapchain;
-		buffer_detection_context *const _buffer_detection;
 
 		DXGI_FORMAT _backbuffer_format = DXGI_FORMAT_UNKNOWN;
 		com_ptr<ID3D11Texture2D> _backbuffer;
@@ -55,7 +57,7 @@ namespace reshade::d3d11
 		com_ptr<ID3D11RasterizerState> _effect_rasterizer;
 		std::unordered_map<size_t, com_ptr<ID3D11SamplerState>> _effect_sampler_states;
 		com_ptr<ID3D11DepthStencilView> _effect_stencil;
-		std::vector<struct d3d11_effect_data> _effect_data;
+		std::vector<struct effect_data> _effect_data;
 
 #if RESHADE_GUI
 		bool init_imgui_resources();
@@ -80,13 +82,11 @@ namespace reshade::d3d11
 #endif
 
 #if RESHADE_DEPTH
-		void draw_depth_debug_menu(buffer_detection_context &tracker);
+		void draw_depth_debug_menu();
 		void update_depth_texture_bindings(com_ptr<ID3D11Texture2D> texture);
 
 		com_ptr<ID3D11Texture2D> _depth_texture;
 		com_ptr<ID3D11ShaderResourceView> _depth_texture_srv;
-
-		bool _filter_aspect_ratio = true;
 		ID3D11Texture2D *_depth_texture_override = nullptr;
 #endif
 	};

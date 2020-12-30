@@ -8,7 +8,7 @@
 #include <cmath> // signbit, isinf, isnan
 #include <cstdio> // snprintf
 #include <cassert>
-#include <algorithm> // std::max
+#include <algorithm> // std::find_if, std::max
 #include <unordered_set>
 
 using namespace reshadefx;
@@ -16,8 +16,8 @@ using namespace reshadefx;
 class codegen_glsl final : public codegen
 {
 public:
-	codegen_glsl(bool debug_info, bool uniforms_to_spec_constants, bool enable_16bit_types)
-		: _debug_info(debug_info), _uniforms_to_spec_constants(uniforms_to_spec_constants), _enable_16bit_types(enable_16bit_types)
+	codegen_glsl(bool debug_info, bool uniforms_to_spec_constants, bool enable_16bit_types, bool flip_vert_y)
+		: _debug_info(debug_info), _uniforms_to_spec_constants(uniforms_to_spec_constants), _enable_16bit_types(enable_16bit_types), _flip_vert_y(flip_vert_y)
 	{
 		// Create default block and reserve a memory block to avoid frequent reallocations
 		std::string &block = _blocks.emplace(0, std::string()).first->second;
@@ -44,6 +44,7 @@ private:
 	bool _debug_info = false;
 	bool _uniforms_to_spec_constants = false;
 	bool _enable_16bit_types = false;
+	bool _flip_vert_y = false;
 	std::unordered_map<id, id> _remapped_sampler_variables;
 	std::unordered_map<std::string, uint32_t> _semantic_to_location;
 
@@ -102,6 +103,7 @@ private:
 	{
 		if constexpr (is_decl)
 		{
+			// Global variables are implicitly 'static' in GLSL, so the keyword does not exist
 			if (type.has(type::q_precise))
 				s += "precise ";
 			if (type.has(type::q_groupshared))
@@ -369,7 +371,7 @@ private:
 			name = '_' + name;
 
 		// Remove duplicated underscore symbols from name which can occur due to namespaces but are not allowed in GLSL
-		for (size_t pos = 0; (pos = name.find("__", pos)) != std::string::npos; pos += 3)
+		for (size_t pos = 0; (pos = name.find("__", pos)) != std::string::npos;)
 			name.replace(pos, 2, "_");
 
 		return name;
@@ -589,6 +591,7 @@ private:
 	{
 		return define_function(loc, info, false);
 	}
+
 	id   define_function(const location &loc, function_info &info, bool is_entry_point)
 	{
 		info.definition = make_id();
@@ -653,13 +656,10 @@ private:
 		_module.entry_points.push_back({ func.unique_name, stype });
 
 		_blocks.at(0) += "#ifdef ENTRY_POINT_" + func.unique_name + '\n';
-		if (stype == shader_type::ps)
-			_blocks.at(0) += "layout(origin_upper_left) in vec4 gl_FragCoord;\n";
 		if (stype == shader_type::cs)
-			_blocks.at(0) += "layout("
-				  "local_size_x = " + std::to_string(num_threads[0]) +
-				", local_size_y = " + std::to_string(num_threads[1]) +
-				", local_size_z = " + std::to_string(num_threads[2]) + ") in;\n";
+			_blocks.at(0) += "layout(local_size_x = " + std::to_string(num_threads[0]) +
+			                      ", local_size_y = " + std::to_string(num_threads[1]) +
+			                      ", local_size_z = " + std::to_string(num_threads[2]) + ") in;\n";
 
 		function_info entry_point;
 		entry_point.return_type = { type::t_void };
@@ -990,6 +990,10 @@ private:
 				code += " = _return." + escape_name(member.name) + ";\n";
 			}
 		}
+
+		// Add code to flip the output vertically
+		if (_flip_vert_y && stype == shader_type::vs)
+			code += "\tgl_Position.y = -gl_Position.y;\n";
 
 		leave_block_and_return(0);
 		leave_function();
@@ -1579,27 +1583,18 @@ private:
 		std::string &loop_data = _blocks.at(loop_block);
 		std::string &continue_data = _blocks.at(continue_block);
 
-		// Condition value can be missing in infinite loop constructs like "for (;;)"
-		const std::string condition_name = condition_value != 0 ? id_to_name(condition_value) : "true";
-
 		increase_indentation_level(loop_data);
 		increase_indentation_level(loop_data);
 		increase_indentation_level(continue_data);
 
 		code += _blocks.at(prev_block);
 
-		if (condition_block == 0)
-			code += "\tbool " + condition_name + ";\n";
-		else
-			code += _blocks.at(condition_block);
-
-		write_location(code, loc);
-
-		code += '\t';
+		// Condition value can be missing in infinite loop constructs like "for (;;)"
+		std::string condition_name = condition_value != 0 ? id_to_name(condition_value) : "true";
 
 		if (condition_block == 0)
 		{
-			// Convert variable initializer to assignment statement
+			// Convert the last SSA variable initializer to an assignment statement
 			auto pos_assign = continue_data.rfind(condition_name);
 			auto pos_prev_assign = continue_data.rfind('\t', pos_assign);
 			continue_data.erase(pos_prev_assign + 1, pos_assign - pos_prev_assign - 1);
@@ -1609,6 +1604,11 @@ private:
 			for (size_t offset = 0; (offset = loop_data.find(continue_id, offset)) != std::string::npos; offset += continue_data.size())
 				loop_data.replace(offset, continue_id.size(), continue_data);
 
+			code += "\tbool " + condition_name + ";\n";
+
+			write_location(code, loc);
+
+			code += '\t';
 			code += "do\n\t{\n\t\t{\n";
 			code += loop_data; // Encapsulate loop body into another scope, so not to confuse any local variables with the current iteration variable accessed in the continue block below
 			code += "\t\t}\n";
@@ -1619,17 +1619,35 @@ private:
 		{
 			std::string &condition_data = _blocks.at(condition_block);
 
-			increase_indentation_level(condition_data);
+			// If the condition data is just a single line, then it is a simple expression, which we can just put into the loop condition as-is
+			if (std::count(condition_data.begin(), condition_data.end(), '\n') == 1)
+			{
+				// Convert SSA variable initializer back to a condition expression
+				auto pos_assign = condition_data.find('=');
+				condition_data.erase(0, pos_assign + 2);
+				auto pos_semicolon = condition_data.rfind(';');
+				condition_data.erase(pos_semicolon);
 
-			// Convert variable initializer to assignment statement
-			auto pos_assign = condition_data.rfind(condition_name);
-			auto pos_prev_assign = condition_data.rfind('\t', pos_assign);
-			condition_data.erase(pos_prev_assign + 1, pos_assign - pos_prev_assign - 1);
+				condition_name = std::move(condition_data);
+				assert(condition_data.empty());
+			}
+			else
+			{
+				code += condition_data;
+
+				increase_indentation_level(condition_data);
+
+				// Convert the last SSA variable initializer to an assignment statement
+				auto pos_assign = condition_data.rfind(condition_name);
+				auto pos_prev_assign = condition_data.rfind('\t', pos_assign);
+				condition_data.erase(pos_prev_assign + 1, pos_assign - pos_prev_assign - 1);
+			}
 
 			const std::string continue_id = "__CONTINUE__" + std::to_string(continue_block);
 			for (size_t offset = 0; (offset = loop_data.find(continue_id, offset)) != std::string::npos; offset += continue_data.size())
 				loop_data.replace(offset, continue_id.size(), continue_data + condition_data);
 
+			code += '\t';
 			code += "while (" + condition_name + ")\n\t{\n\t\t{\n";
 			code += loop_data;
 			code += "\t\t}\n";
@@ -1818,7 +1836,7 @@ private:
 	}
 };
 
-codegen *reshadefx::create_codegen_glsl(bool debug_info, bool uniforms_to_spec_constants, bool enable_16bit_types)
+codegen *reshadefx::create_codegen_glsl(bool debug_info, bool uniforms_to_spec_constants, bool enable_16bit_types, bool flip_vert_y)
 {
-	return new codegen_glsl(debug_info, uniforms_to_spec_constants, enable_16bit_types);
+	return new codegen_glsl(debug_info, uniforms_to_spec_constants, enable_16bit_types, flip_vert_y);
 }
